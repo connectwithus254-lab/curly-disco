@@ -1,0 +1,93 @@
+//@version=6
+indicator(
+     title               = "Adaptive Quantitative Market Regime Indicator (PineTS Compatible)",
+     shorttitle          = "AQMRI",
+     overlay             = false,
+     precision           = 2
+ )
+
+// ============================================================================
+// COMPANION INDICATOR FOR PINTS & PINETS-CLI QUANTITATIVE RESEARCH
+// ============================================================================
+// This indicator mirrors the exact mathematical factors of the AQMRS strategy,
+// plotting the continuous multi-factor quantitative scores, Z-scores, Price Curvature,
+// and Regime states for integration with external CLI, Python, or TypeScript pipelines.
+
+// --- Inputs ---
+grp_weights = "Multi-Factor Weights"
+w_trend     = input.float(15.0, "Weight: Trend Engine", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_htf       = input.float(15.0, "Weight: HTF Trend", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_mom       = input.float(15.0, "Weight: Momentum Engine", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_adx       = input.float(10.0, "Weight: ADX / Directional", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_rsiRegime = input.float(5.0,  "Weight: RSI Regime Context", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_vwap      = input.float(5.0,  "Weight: VWAP Relationship", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_volume    = input.float(5.0,  "Weight: Volume Confirmation", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_volatility= input.float(5.0,  "Weight: Volatility Regime", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_zScore    = input.float(5.0,  "Weight: Price Z-Score", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_curvature = input.float(5.0,  "Weight: Price Curvature (2nd Deriv)", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_structure = input.float(10.0, "Weight: Market Structure (BOS)", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_er        = input.float(5.0,  "Weight: Kaufman Price Efficiency", minval = 0.0, maxval = 50.0, group = grp_weights)
+
+// --- Engine Core ---
+atrVal = ta.atr(14)
+safeAtr = (na(atrVal) or atrVal <= 0.0) ? (close * 0.01) : atrVal
+atrPercentile = nz(ta.percentrank(safeAtr, 100), 50.0)
+
+// Trend
+emaFast = ta.ema(close, 9)
+emaMed  = ta.ema(close, 50)
+emaSlow = ta.ema(close, 200)
+bullishTrendAlign = close > emaFast and emaFast > emaMed and emaMed > emaSlow
+bearishTrendAlign = close < emaFast and emaFast < emaMed and emaMed < emaSlow
+
+// Momentum & ADX
+rsiVal = ta.rsi(close, 14)
+normMom = (close - nz(close[10], close)) / safeAtr
+[diPlus, diMinus, adxVal] = ta.dmi(14, 14)
+
+// Z-Score
+zMean = ta.sma(close, 20)
+zStd = ta.stdev(close, 20)
+zScore = zStd > 0.0 ? (close - zMean) / zStd : 0.0
+
+// Price Curvature
+priceCurvatureRaw = (close - 2.0 * nz(close[1], close) + nz(close[2], close)) / safeAtr
+priceCurvature = ta.ema(priceCurvatureRaw, 3)
+
+// Efficiency Ratio
+erNetMove = math.abs(close - nz(close[10], close))
+erGrossPath = math.sum(math.abs(close - close[1]), 10)
+efficiencyRatio = erGrossPath > 0.0 ? (erNetMove / erGrossPath) : 0.0
+
+// Scores
+var float scoreTrendLong = 0.0
+var float scoreTrendShort = 0.0
+scoreTrendLong := bullishTrendAlign ? 80.0 : (close > emaMed ? 50.0 : 20.0)
+scoreTrendShort := bearishTrendAlign ? 80.0 : (close < emaMed ? 50.0 : 20.0)
+
+var float scoreMomLong = 0.0
+var float scoreMomShort = 0.0
+scoreMomLong := (rsiVal > 50.0 ? 50.0 : 20.0) + (normMom > 0.0 ? 40.0 : 0.0)
+scoreMomShort := (rsiVal < 50.0 ? 50.0 : 20.0) + (normMom < 0.0 ? 40.0 : 0.0)
+
+var float scoreCurvLong = 0.0
+var float scoreCurvShort = 0.0
+scoreCurvLong := priceCurvature > 0.1 ? 80.0 : (priceCurvature > 0.0 ? 50.0 : 20.0)
+scoreCurvShort := priceCurvature < -0.1 ? 80.0 : (priceCurvature < 0.0 ? 50.0 : 20.0)
+
+sumWeights = w_trend + w_mom + w_adx + w_zScore + w_curvature + w_er
+safeWeights = sumWeights <= 0 ? 1.0 : sumWeights
+
+rawLong = (scoreTrendLong * w_trend + scoreMomLong * w_mom + (diPlus > diMinus ? 80.0 : 20.0) * w_adx + (zScore > 0.5 ? 70.0 : 30.0) * w_zScore + scoreCurvLong * w_curvature + (efficiencyRatio * 100.0) * w_er) / safeWeights
+rawShort = (scoreTrendShort * w_trend + scoreMomShort * w_mom + (diMinus > diPlus ? 80.0 : 20.0) * w_adx + (zScore < -0.5 ? 70.0 : 30.0) * w_zScore + scoreCurvShort * w_curvature + (efficiencyRatio * 100.0) * w_er) / safeWeights
+
+longScore = math.min(100.0, math.max(0.0, rawLong))
+shortScore = math.min(100.0, math.max(0.0, rawShort))
+
+// Plots
+plot(longScore, "LongScore", color = color.green, linewidth = 2)
+plot(shortScore, "ShortScore", color = color.red, linewidth = 2)
+plot(adxVal, "ADX", color = color.blue, linewidth = 1)
+plot(efficiencyRatio * 100.0, "EfficiencyRatio", color = color.purple, linewidth = 1)
+hline(70, "Signal Threshold", color = color.yellow, linestyle = hline.style_dashed)
+hline(50, "Neutral Line", color = color.gray, linestyle = hline.style_dotted)

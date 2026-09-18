@@ -1,0 +1,38 @@
+{
+  "name": "curly-disco",
+  "version": "1.0.0",
+  "description": "Adaptive Quantitative Market Regime Strategy & Research Framework",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "cli": "tsx src/cli.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/connectwithus254-lab/curly-disco.git"
+  },
+  "keywords": [
+    "tradingview",
+    "pine-script-v6",
+    "quantitative-trading",
+    "market-regimes",
+    "backtesting",
+    "walk-forward",
+    "pinets"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.6.1",
+    "pinets-cli": "^0.1.15",
+    "tsx": "^4.23.13",
+    "typescript": "^5.8.2",
+    "vitest": "^2.1.9"
+  },
+  "dependencies": {
+    "@mathieuc/tradingview": "^3.5.2",
+    "pinets": "^0.9.34"
+  }
+}

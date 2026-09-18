@@ -1,0 +1,1077 @@
+//@version=6
+strategy(
+     title               = "Adaptive Quantitative Market Regime Strategy",
+     shorttitle          = "AQMRS",
+     overlay             = true,
+     initial_capital     = 100000,
+     default_qty_type    = strategy.percent_of_equity,
+     default_qty_value   = 10.0,
+     commission_type     = strategy.commission.percent,
+     commission_value    = 0.05,
+     slippage            = 2,
+     pyramiding          = 0,
+     calc_on_every_tick  = false,
+     max_bars_back       = 1000
+ )
+
+// ============================================================================
+// ARCHITECTURAL & METHODOLOGICAL NOTE:
+// ----------------------------------------------------------------------------
+// This strategy implements an adaptive multi-factor quantitative market regime
+// framework designed for cross-asset robustness (Crypto, Equities, Forex, Indices).
+//
+// Key Principles:
+// 1. Strict Anti-Repainting: No lookahead bias. All Higher-Timeframe (HTF)
+//    security queries strictly fetch confirmed closed bars ([1] offset with
+//    barmerge.lookahead_off). Pivots are confirmed strictly after right-bars lag.
+// 2. Scale-Free / Normalized Variables: Momentum, Volatility, Curvature, and
+//    Distances are normalized by ATR or standard deviations, avoiding arbitrary
+//    fixed-dollar or single-asset heuristics.
+// 3. Multi-Factor Scoring: Long and Short scores (0-100) are evaluated separately
+//    across 13 independent and semi-independent mathematical factors.
+// 4. Regime Adaptation: Dynamic adaptation of entry thresholds, stop distance,
+//    and profit targets across 6 distinct quantitative market regimes.
+// ============================================================================
+
+// ============================================================================
+// 1. STRATEGY & RISK MANAGEMENT INPUTS
+// ============================================================================
+grp_risk = "1. Strategy Risk & Position Sizing"
+sizingMode           = input.string("Risk % of Equity", "Position Sizing Mode", options = ["Risk % of Equity", "% of Equity Capital", "Fixed Units"], group = grp_risk)
+riskPerTradePct      = input.float(1.0, "Risk % of Equity per Trade", minval = 0.05, maxval = 10.0, step = 0.1, group = grp_risk, tooltip = "Percentage of account equity risked on stop loss distance.")
+capitalAllocationPct = input.float(10.0, "Capital Allocation % (for % Equity Mode)", minval = 1.0, maxval = 100.0, step = 1.0, group = grp_risk)
+fixedUnitsQty        = input.float(1.0, "Fixed Order Units", minval = 0.0001, step = 0.1, group = grp_risk)
+enableConfidenceSizing = input.bool(false, "Enable Confidence Sizing Scaling", group = grp_risk, tooltip = "Scale position size slightly with higher composite score (max +30%). Default off for strict risk discipline.")
+baseAtrStopMult      = input.float(2.0, "ATR Stop Loss Multiplier", minval = 0.5, maxval = 10.0, step = 0.1, group = grp_risk)
+baseTargetRr         = input.float(2.0, "Base Risk/Reward Ratio", minval = 0.5, maxval = 10.0, step = 0.1, group = grp_risk)
+adaptiveRrEnabled    = input.bool(true, "Adaptive Regime Risk/Reward", group = grp_risk, tooltip = "Expands R:R in strong trends and tightens in ranges.")
+enableBreakEven      = input.bool(true, "Enable Break-Even Stop", group = grp_risk)
+beTriggerAtr         = input.float(1.5, "Break-Even Trigger (ATR Multiples)", minval = 0.5, step = 0.1, group = grp_risk)
+beOffsetAtr          = input.float(0.1, "Break-Even Buffer (ATR Multiples)", minval = 0.0, step = 0.05, group = grp_risk)
+enableTrailingStop   = input.bool(true, "Enable ATR Trailing Stop", group = grp_risk)
+trailActivationAtr   = input.float(1.5, "Trailing Activation Profit (ATR)", minval = 0.5, step = 0.1, group = grp_risk)
+trailAtrMult         = input.float(2.0, "Trailing Stop ATR Multiplier", minval = 0.5, step = 0.1, group = grp_risk)
+trailLookback        = input.int(7, "Trailing Stop Pivot Lookback", minval = 2, maxval = 50, group = grp_risk)
+maxHoldingBars       = input.int(120, "Maximum Holding Period (Bars, 0 = Disabled)", minval = 0, maxval = 1000, group = grp_risk)
+exitOnMomentumCollapse = input.bool(true, "Exit on Momentum Collapse / Mid-EMA Cross", group = grp_risk)
+exitOnOppositeScore  = input.bool(true, "Exit on Extreme Opposite Score", group = grp_risk)
+oppExitScoreThreshold= input.float(78.0, "Opposite Exit Score Threshold", minval = 50.0, maxval = 100.0, group = grp_risk)
+
+// ============================================================================
+// 2. SCORING MODEL THRESHOLDS & ENTRY FILTERS
+// ============================================================================
+grp_score = "2. Scoring Model Thresholds"
+longThreshold        = input.float(70.0, "Long Entry Score Threshold (0-100)", minval = 40.0, maxval = 95.0, step = 1.0, group = grp_score)
+shortThreshold       = input.float(70.0, "Short Entry Score Threshold (0-100)", minval = 40.0, maxval = 95.0, step = 1.0, group = grp_score)
+requireHtfNonOpposite= input.bool(true, "HTF Anti-Contradiction Filter", group = grp_score, tooltip = "Blocks Longs if HTF trend is strongly bearish; blocks Shorts if HTF trend is strongly bullish.")
+minAdxTrendFilter    = input.float(18.0, "Minimum ADX Filter for Trend Entries", minval = 0.0, maxval = 50.0, group = grp_score)
+minAtrPctFilter      = input.float(0.02, "Minimum ATR % of Price (Liquidity Filter)", minval = 0.0, maxval = 5.0, step = 0.01, group = grp_score)
+regimeAdaptiveThresholds = input.bool(true, "Regime-Adaptive Entry Thresholds", group = grp_score, tooltip = "Adjusts entry threshold dynamically depending on active market regime.")
+
+// ============================================================================
+// 3. MULTI-FACTOR WEIGHTS (LONG & SHORT SCORING)
+// ============================================================================
+grp_weights = "3. Multi-Factor Weights"
+w_trend     = input.float(15.0, "Weight: Trend Engine", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_htf       = input.float(15.0, "Weight: HTF Trend", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_mom       = input.float(15.0, "Weight: Momentum Engine", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_adx       = input.float(10.0, "Weight: ADX / Directional", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_rsiRegime = input.float(5.0,  "Weight: RSI Regime Context", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_vwap      = input.float(5.0,  "Weight: VWAP Relationship", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_volume    = input.float(5.0,  "Weight: Volume Confirmation", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_volatility= input.float(5.0,  "Weight: Volatility Regime", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_zScore    = input.float(5.0,  "Weight: Price Z-Score", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_curvature = input.float(5.0,  "Weight: Price Curvature (2nd Deriv)", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_structure = input.float(10.0, "Weight: Market Structure (BOS)", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_er        = input.float(5.0,  "Weight: Kaufman Price Efficiency", minval = 0.0, maxval = 50.0, group = grp_weights)
+
+// ============================================================================
+// 4. TREND ENGINE PARAMETERS
+// ============================================================================
+grp_trend = "4. Trend Engine Parameters"
+fastEmaLen  = input.int(9, "Fast EMA Length", minval = 2, maxval = 100, group = grp_trend)
+medEmaLen   = input.int(50, "Medium EMA Length", minval = 5, maxval = 200, group = grp_trend)
+slowEmaLen  = input.int(200, "Slow EMA Length", minval = 20, maxval = 500, group = grp_trend)
+useHma      = input.bool(true, "Include Hull Moving Average (HMA)", group = grp_trend)
+hmaLen      = input.int(21, "HMA Length", minval = 3, maxval = 200, group = grp_trend)
+
+// ============================================================================
+// 5. HIGHER-TIMEFRAME (HTF) TREND PARAMETERS (STRICT ANTI-REPAINT)
+// ============================================================================
+grp_htf = "5. Higher-Timeframe (HTF) Trend (Anti-Repaint)"
+htfTimeframe         = input.timeframe("60", "HTF Timeframe", group = grp_htf)
+htfFastEmaLen        = input.int(20, "HTF Fast EMA Length", minval = 2, maxval = 200, group = grp_htf)
+htfSlowEmaLen        = input.int(50, "HTF Slow EMA Length", minval = 5, maxval = 500, group = grp_htf)
+htfStrictAntiRepaint = input.bool(true, "HTF Confirmed Bar Only (Anti-Repaint)", group = grp_htf, tooltip = "When enabled, reads completed closed HTF candle [1]. Zero lookahead bias.")
+
+// ============================================================================
+// 6. MOMENTUM ENGINE PARAMETERS
+// ============================================================================
+grp_mom = "6. Momentum Engine Parameters"
+rsiLen         = input.int(14, "RSI Length", minval = 2, maxval = 100, group = grp_mom)
+rocLen         = input.int(10, "Rate of Change (ROC) Length", minval = 1, maxval = 100, group = grp_mom)
+normMomLen     = input.int(10, "Normalized Momentum Length (ATR-scaled)", minval = 1, maxval = 100, group = grp_mom)
+macdFastLen    = input.int(12, "MACD Fast Length", minval = 2, maxval = 100, group = grp_mom)
+macdSlowLen    = input.int(26, "MACD Slow Length", minval = 5, maxval = 200, group = grp_mom)
+macdSignalLen  = input.int(9, "MACD Signal Length", minval = 2, maxval = 50, group = grp_mom)
+
+// ============================================================================
+// 7. DIRECTIONAL & ADX ENGINE
+// ============================================================================
+grp_adx = "7. Directional & ADX Engine"
+adxLen         = input.int(14, "ADX Period", minval = 2, maxval = 100, group = grp_adx)
+adxSmoothing   = input.int(14, "ADX Smoothing", minval = 1, maxval = 50, group = grp_adx)
+adxTrendLevel  = input.float(25.0, "ADX Strong Trend Threshold", minval = 10.0, maxval = 50.0, group = grp_adx)
+
+// ============================================================================
+// 8. VOLATILITY ENGINE PARAMETERS
+// ============================================================================
+grp_vol = "8. Volatility Engine Parameters"
+atrLen              = input.int(14, "ATR Length", minval = 1, maxval = 100, group = grp_vol)
+volPercentileLookback = input.int(100, "Historical Volatility Percentile Lookback", minval = 20, maxval = 500, group = grp_vol)
+bbLen               = input.int(20, "Bollinger Bands Length", minval = 5, maxval = 100, group = grp_vol)
+bbMult              = input.float(2.0, "Bollinger Bands Multiplier", minval = 0.5, maxval = 4.0, step = 0.1, group = grp_vol)
+
+// ============================================================================
+// 9. PRICE DISTRIBUTION (Z-SCORE) & PRICE EFFICIENCY
+// ============================================================================
+grp_dist = "9. Price Distribution & Efficiency"
+zScoreLen           = input.int(20, "Rolling Z-Score Length", minval = 5, maxval = 200, group = grp_dist)
+zScoreReversionBand = input.float(2.0, "Z-Score Mean Reversion Band (Std Dev)", minval = 0.5, maxval = 4.0, step = 0.1, group = grp_dist)
+erLen               = input.int(10, "Kaufman Price Efficiency Ratio Length", minval = 2, maxval = 100, group = grp_dist)
+
+// ============================================================================
+// 10. PRICE CURVATURE (SECOND DERIVATIVE) & OPTION PROXIES
+// ============================================================================
+grp_curv = "10. Price Curvature & Option Proxies"
+curvatureSmoothLen  = input.int(3, "Price Curvature Smoothing EMA", minval = 1, maxval = 20, group = grp_curv)
+enableExternalGreeks= input.bool(false, "Enable External Option Greeks Input", group = grp_curv)
+extDelta            = input.float(0.0, "External Delta (-1.0 to +1.0)", minval = -1.0, maxval = 1.0, step = 0.05, group = grp_curv)
+extGamma            = input.float(0.0, "External Gamma", minval = 0.0, maxval = 10.0, step = 0.01, group = grp_curv)
+extTheta            = input.float(0.0, "External Theta", minval = -100.0, maxval = 0.0, step = 0.1, group = grp_curv)
+extIv               = input.float(0.0, "External Implied Volatility (%)", minval = 0.0, maxval = 500.0, step = 1.0, group = grp_curv)
+
+// ============================================================================
+// 11. MARKET STRUCTURE & VOLUME PARAMETERS
+// ============================================================================
+grp_struct = "11. Market Structure & Volume"
+pivotLeftBars       = input.int(5, "Pivot Left Bars", minval = 1, maxval = 30, group = grp_struct)
+pivotRightBars      = input.int(5, "Pivot Right Bars (Strict Non-Repainting Lag)", minval = 1, maxval = 30, group = grp_struct)
+volSmaLen           = input.int(20, "Volume Moving Average Length", minval = 2, maxval = 100, group = grp_struct)
+cmfLen              = input.int(20, "Chaikin Money Flow Length", minval = 2, maxval = 100, group = grp_struct)
+
+// ============================================================================
+// 12. EXECUTION, COOLDOWN & BACKTEST DATE FILTER
+// ============================================================================
+grp_exec = "12. Execution, Cooldown & Date Filters"
+entryExecutionType  = input.string("Market", "Entry Execution Type", options = ["Market", "Breakout", "Pullback"], group = grp_exec)
+cooldownBars        = input.int(3, "Entry Cooldown (Minimum Bars Between Trades)", minval = 0, maxval = 50, group = grp_exec)
+maxTradesPerDay     = input.int(5, "Maximum Trades Per Day", minval = 1, maxval = 50, group = grp_exec)
+enableDateFilter    = input.bool(false, "Enable Backtest Date Filter", group = grp_exec)
+startDate           = input.time(timestamp("2020-01-01 00:00 +0000"), "Start Date", group = grp_exec)
+endDate             = input.time(timestamp("2030-01-01 00:00 +0000"), "End Date", group = grp_exec)
+
+// ============================================================================
+// 13. VISUAL DISPLAY & DASHBOARD SETTINGS
+// ============================================================================
+grp_visual = "13. Visuals & Dashboard"
+showDashboard       = input.bool(true, "Show Quantitative Dashboard Table", group = grp_visual)
+dashboardPos        = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Bottom Right", "Top Left", "Bottom Left"], group = grp_visual)
+showEmaLines        = input.bool(true, "Show EMA Trend Lines", group = grp_visual)
+showVwapLine        = input.bool(true, "Show VWAP Line", group = grp_visual)
+showSignals         = input.bool(true, "Show Entry & Exit Markers", group = grp_visual)
+showStopTargetLines = input.bool(true, "Show Active Stop/Target Levels", group = grp_visual)
+
+// ============================================================================
+// MATHEMATICAL ENGINE CALCULATIONS
+// ============================================================================
+
+// --- 1. CORE VOLATILITY ENGINE ---
+// ATR calculation
+atrVal = ta.atr(atrLen)
+safeAtr = (na(atrVal) or atrVal <= 0.0) ? (close * 0.01) : atrVal
+atrPct = (safeAtr / close) * 100.0
+
+// Historical Volatility Percentile: normalized relative to asset's own history
+atrPercentile = nz(ta.percentrank(safeAtr, volPercentileLookback), 50.0)
+
+// Bollinger Bands & Bandwidth
+bbBasis = ta.sma(close, bbLen)
+bbDev = bbMult * ta.stdev(close, bbLen)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+bbWidth = bbBasis != 0.0 ? ((bbUpper - bbLower) / bbBasis) * 100.0 : 0.0
+bbwPercentile = nz(ta.percentrank(bbWidth, volPercentileLookback), 50.0)
+
+// Squeeze & Expansion flags
+isVolSqueeze = bbwPercentile <= 20.0 and atrPercentile <= 25.0
+isVolExpansion = bbwPercentile >= 80.0 or atrPercentile >= 80.0
+
+// --- 2. TREND ENGINE ---
+emaFast = ta.ema(close, fastEmaLen)
+emaMed  = ta.ema(close, medEmaLen)
+emaSlow = ta.ema(close, slowEmaLen)
+hmaVal  = useHma ? ta.hma(close, hmaLen) : emaFast
+
+// Trend Alignment & Slopes
+bullishTrendAlign = close > emaFast and emaFast > emaMed and emaMed > emaSlow
+bearishTrendAlign = close < emaFast and emaFast < emaMed and emaMed < emaSlow
+fastSlopeUp = emaFast > emaFast[1]
+medSlopeUp  = emaMed > emaMed[1]
+slowSlopeUp = emaSlow > emaSlow[1]
+hmaSlopeUp  = hmaVal > hmaVal[1]
+
+trendDistAtr = (emaFast - emaSlow) / safeAtr
+
+// Trend Raw Scores (0 - 100)
+var float scoreTrendLong = 0.0
+var float scoreTrendShort = 0.0
+scoreTrendLong := 0.0
+scoreTrendShort := 0.0
+
+if bullishTrendAlign
+    scoreTrendLong += 45.0
+else if close > emaMed and emaFast > emaMed
+    scoreTrendLong += 25.0
+
+if fastSlopeUp and medSlopeUp
+    scoreTrendLong += 25.0
+else if fastSlopeUp
+    scoreTrendLong += 10.0
+
+if hmaSlopeUp
+    scoreTrendLong += 15.0
+
+if close > emaFast
+    scoreTrendLong += 15.0
+
+if bearishTrendAlign
+    scoreTrendShort += 45.0
+else if close < emaMed and emaFast < emaMed
+    scoreTrendShort += 25.0
+
+if not fastSlopeUp and not medSlopeUp
+    scoreTrendShort += 25.0
+else if not fastSlopeUp
+    scoreTrendShort += 10.0
+
+if not hmaSlopeUp
+    scoreTrendShort += 15.0
+
+if close < emaFast
+    scoreTrendShort += 15.0
+
+scoreTrendLong  := math.min(100.0, math.max(0.0, scoreTrendLong))
+scoreTrendShort := math.min(100.0, math.max(0.0, scoreTrendShort))
+
+// --- 3. HIGHER-TIMEFRAME (HTF) TREND ENGINE (STRICT ANTI-REPAINT) ---
+// We explicitly request the HTF bar with [1] offset to ensure zero lookahead bias
+htfShift = htfStrictAntiRepaint ? 1 : 0
+[htfClose, htfFastEma, htfSlowEma] = request.security(
+     syminfo.tickerid,
+     htfTimeframe,
+     [close[htfShift], ta.ema(close, htfFastEmaLen)[htfShift], ta.ema(close, htfSlowEmaLen)[htfShift]],
+     gaps = barmerge.gaps_off,
+     lookahead = barmerge.lookahead_off
+ )
+
+htfBullish = not na(htfClose) and (htfClose > htfFastEma) and (htfFastEma > htfSlowEma)
+htfBearish = not na(htfClose) and (htfClose < htfFastEma) and (htfFastEma < htfSlowEma)
+htfFastRising = not na(htfFastEma) and (htfFastEma > htfFastEma[1])
+
+var float scoreHtfLong = 0.0
+var float scoreHtfShort = 0.0
+scoreHtfLong := 0.0
+scoreHtfShort := 0.0
+
+if htfBullish
+    scoreHtfLong += 60.0
+    if htfFastRising
+        scoreHtfLong += 40.0
+else if not na(htfClose) and htfClose > htfFastEma
+    scoreHtfLong += 30.0
+
+if htfBearish
+    scoreHtfShort += 60.0
+    if not htfFastRising
+        scoreHtfShort += 40.0
+else if not na(htfClose) and htfClose < htfFastEma
+    scoreHtfShort += 30.0
+
+scoreHtfLong  := math.min(100.0, math.max(0.0, scoreHtfLong))
+scoreHtfShort := math.min(100.0, math.max(0.0, scoreHtfShort))
+
+// --- 4. MOMENTUM ENGINE ---
+rsiVal = ta.rsi(close, rsiLen)
+rocVal = ta.roc(close, rocLen)
+
+// Normalized Momentum: price delta normalized by volatility (ATR multiples)
+normMom = (close - nz(close[normMomLen], close)) / safeAtr
+
+// MACD Normalized Momentum
+macdLine = ta.ema(close, macdFastLen) - ta.ema(close, macdSlowLen)
+macdSignal = ta.ema(macdLine, macdSignalLen)
+macdHist = macdLine - macdSignal
+normMacdHist = macdHist / safeAtr
+
+// Price Distance from Medium EMA normalized by ATR
+distEmaMedAtr = (close - emaMed) / safeAtr
+
+var float scoreMomLong = 0.0
+var float scoreMomShort = 0.0
+scoreMomLong := 0.0
+scoreMomShort := 0.0
+
+// Long Momentum Logic
+if rsiVal > 50.0 and rsiVal < 75.0
+    scoreMomLong += 30.0
+else if rsiVal >= 75.0 and rsiVal <= 85.0
+    scoreMomLong += 15.0 // Strong but nearing extreme
+
+if normMom > 0.5
+    scoreMomLong += 25.0
+else if normMom > 0.0
+    scoreMomLong += 10.0
+
+if normMacdHist > 0.0
+    scoreMomLong += 25.0
+    if normMacdHist > normMacdHist[1]
+        scoreMomLong += 10.0
+
+if distEmaMedAtr > 0.0 and distEmaMedAtr < 3.0
+    scoreMomLong += 10.0
+
+// Short Momentum Logic
+if rsiVal < 50.0 and rsiVal > 25.0
+    scoreMomShort += 30.0
+else if rsiVal <= 25.0 and rsiVal >= 15.0
+    scoreMomShort += 15.0
+
+if normMom < -0.5
+    scoreMomShort += 25.0
+else if normMom < 0.0
+    scoreMomShort += 10.0
+
+if normMacdHist < 0.0
+    scoreMomShort += 25.0
+    if normMacdHist < normMacdHist[1]
+        scoreMomShort += 10.0
+
+if distEmaMedAtr < 0.0 and distEmaMedAtr > -3.0
+    scoreMomShort += 10.0
+
+scoreMomLong  := math.min(100.0, math.max(0.0, scoreMomLong))
+scoreMomShort := math.min(100.0, math.max(0.0, scoreMomShort))
+
+// --- 5. DIRECTIONAL MOVEMENT & ADX ENGINE ---
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxSmoothing)
+diSum = diPlus + diMinus
+diSpreadNorm = diSum != 0.0 ? (diPlus - diMinus) / diSum : 0.0
+
+var float scoreAdxLong = 0.0
+var float scoreAdxShort = 0.0
+scoreAdxLong := 0.0
+scoreAdxShort := 0.0
+
+if diPlus > diMinus
+    scoreAdxLong += 40.0
+    if diSpreadNorm > 0.2
+        scoreAdxLong += 20.0
+    if adxVal >= adxTrendLevel
+        scoreAdxLong += 40.0
+    else if adxVal >= 18.0
+        scoreAdxLong += 20.0
+
+if diMinus > diPlus
+    scoreAdxShort += 40.0
+    if diSpreadNorm < -0.2
+        scoreAdxShort += 20.0
+    if adxVal >= adxTrendLevel
+        scoreAdxShort += 40.0
+    else if adxVal >= 18.0
+        scoreAdxShort += 20.0
+
+scoreAdxLong  := math.min(100.0, math.max(0.0, scoreAdxLong))
+scoreAdxShort := math.min(100.0, math.max(0.0, scoreAdxShort))
+
+// --- 6. RSI REGIME (CARDWELL RANGE DISCIPLINE) ---
+// Bull regime range: 40-80. Bear regime range: 20-60.
+var float scoreRsiRegimeLong = 0.0
+var float scoreRsiRegimeShort = 0.0
+scoreRsiRegimeLong := 0.0
+scoreRsiRegimeShort := 0.0
+
+if rsiVal >= 40.0 and rsiVal <= 80.0
+    // Bull regime territory
+    if rsiVal >= 45.0 and rsiVal <= 65.0
+        scoreRsiRegimeLong := 100.0 // Prime expansion sweet spot
+    else if rsiVal > 65.0 and rsiVal <= 75.0
+        scoreRsiRegimeLong := 75.0
+    else if rsiVal >= 40.0 and rsiVal < 45.0
+        scoreRsiRegimeLong := 80.0 // Healthy pullback zone
+
+if rsiVal >= 20.0 and rsiVal <= 60.0
+    // Bear regime territory
+    if rsiVal >= 35.0 and rsiVal <= 55.0
+        scoreRsiRegimeShort := 100.0 // Prime breakdown sweet spot
+    else if rsiVal >= 25.0 and rsiVal < 35.0
+        scoreRsiRegimeShort := 75.0
+    else if rsiVal > 55.0 and rsiVal <= 60.0
+        scoreRsiRegimeShort := 80.0 // Healthy bear rally zone
+
+// --- 7. VWAP RELATIONSHIP ---
+vwapVal = ta.vwap(hlc3)
+safeVwap = na(vwapVal) ? close : vwapVal
+distVwapAtr = (close - safeVwap) / safeAtr
+vwapSlopeUp = safeVwap >= nz(safeVwap[1], safeVwap)
+
+var float scoreVwapLong = 0.0
+var float scoreVwapShort = 0.0
+scoreVwapLong := 0.0
+scoreVwapShort := 0.0
+
+if close > safeVwap
+    scoreVwapLong += 50.0
+    if vwapSlopeUp
+        scoreVwapLong += 30.0
+    if distVwapAtr > 0.1 and distVwapAtr < 2.5
+        scoreVwapLong += 20.0
+
+if close < safeVwap
+    scoreVwapShort += 50.0
+    if not vwapSlopeUp
+        scoreVwapShort += 30.0
+    if distVwapAtr < -0.1 and distVwapAtr > -2.5
+        scoreVwapShort += 20.0
+
+scoreVwapLong  := math.min(100.0, math.max(0.0, scoreVwapLong))
+scoreVwapShort := math.min(100.0, math.max(0.0, scoreVwapShort))
+
+// --- 8. VOLUME CONFIRMATION & MONEY FLOW ---
+volSma = ta.sma(volume, volSmaLen)
+rVol = volSma > 0.0 ? (volume / volSma) : 1.0
+
+// Chaikin Money Flow Proxy
+mfMultiplier = (high - low != 0.0) ? ((close - low) - (high - close)) / (high - low) : 0.0
+cmfVolume = mfMultiplier * volume
+safeVolSum = ta.sma(volume, cmfLen) * cmfLen
+cmfVal = safeVolSum > 0.0 ? (ta.sma(cmfVolume, cmfLen) * cmfLen) / safeVolSum : 0.0
+
+var float scoreVolLong = 0.0
+var float scoreVolShort = 0.0
+scoreVolLong := 0.0
+scoreVolShort := 0.0
+
+if rVol >= 1.0
+    scoreVolLong += 40.0
+    if rVol >= 1.5
+        scoreVolLong += 20.0
+    if cmfVal > 0.05
+        scoreVolLong += 40.0
+    else if cmfVal > 0.0
+        scoreVolLong += 20.0
+else if rVol >= 0.7
+    if cmfVal > 0.0
+        scoreVolLong += 30.0
+
+if rVol >= 1.0
+    scoreVolShort += 40.0
+    if rVol >= 1.5
+        scoreVolShort += 20.0
+    if cmfVal < -0.05
+        scoreVolShort += 40.0
+    else if cmfVal < 0.0
+        scoreVolShort += 20.0
+else if rVol >= 0.7
+    if cmfVal < 0.0
+        scoreVolShort += 30.0
+
+scoreVolLong  := math.min(100.0, math.max(0.0, scoreVolLong))
+scoreVolShort := math.min(100.0, math.max(0.0, scoreVolShort))
+
+// --- 9. PRICE Z-SCORE & DISTRIBUTION ENGINE ---
+zMean = ta.sma(close, zScoreLen)
+zStd = ta.stdev(close, zScoreLen)
+zScore = zStd > 0.0 ? (close - zMean) / zStd : 0.0
+
+var float scoreZLong = 0.0
+var float scoreZShort = 0.0
+scoreZLong := 0.0
+scoreZShort := 0.0
+
+// Contextual Z-score:
+// In trending conditions (ADX >= 20): moderate positive Z confirms trend.
+// In mean-reverting conditions (ADX < 20): extreme negative Z is oversold buy.
+if adxVal >= 20.0
+    // Trend continuation mode
+    if zScore >= 0.3 and zScore <= 2.0
+        scoreZLong := 85.0
+    else if zScore > 2.0 and zScore <= 2.8
+        scoreZLong := 50.0
+    else if zScore < -0.2 and zScore > -1.5 and bullishTrendAlign
+        scoreZLong := 75.0 // Healthy pullback in bull trend
+
+    if zScore <= -0.3 and zScore >= -2.0
+        scoreZShort := 85.0
+    else if zScore < -2.0 and zScore >= -2.8
+        scoreZShort := 50.0
+    else if zScore > 0.2 and zScore < 1.5 and bearishTrendAlign
+        scoreZShort := 75.0 // Bear rally in downtrend
+else
+    // Mean reversion mode
+    if zScore <= -zScoreReversionBand
+        scoreZLong := 90.0
+    else if zScore <= -1.0
+        scoreZLong := 60.0
+
+    if zScore >= zScoreReversionBand
+        scoreZShort := 90.0
+    else if zScore >= 1.0
+        scoreZShort := 60.0
+
+scoreZLong  := math.min(100.0, math.max(0.0, scoreZLong))
+scoreZShort := math.min(100.0, math.max(0.0, scoreZShort))
+
+// --- 10. PRICE CURVATURE (SECOND DERIVATIVE ACCELERATION) ---
+// Mathematically: acceleration = d2P/dt2 = (P(t) - 2*P(t-1) + P(t-2)) / ATR
+// Clearly labeled as Price Curvature (Gamma acceleration proxy).
+priceCurvatureRaw = (close - 2.0 * nz(close[1], close) + nz(close[2], close)) / safeAtr
+priceCurvature = ta.ema(priceCurvatureRaw, curvatureSmoothLen)
+
+var float scoreCurvLong = 0.0
+var float scoreCurvShort = 0.0
+scoreCurvLong := 0.0
+scoreCurvShort := 0.0
+
+if priceCurvature > 0.1
+    scoreCurvLong += 50.0
+    if priceCurvature > 0.3
+        scoreCurvLong += 30.0
+    if priceCurvature > priceCurvature[1]
+        scoreCurvLong += 20.0
+else if priceCurvature > 0.0
+    scoreCurvLong += 30.0
+
+if priceCurvature < -0.1
+    scoreCurvShort += 50.0
+    if priceCurvature < -0.3
+        scoreCurvShort += 30.0
+    if priceCurvature < priceCurvature[1]
+        scoreCurvShort += 20.0
+else if priceCurvature < 0.0
+    scoreCurvShort += 30.0
+
+scoreCurvLong  := math.min(100.0, math.max(0.0, scoreCurvLong))
+scoreCurvShort := math.min(100.0, math.max(0.0, scoreCurvShort))
+
+// --- 11. OPTIONS / GREEKS CONTEXT & PROXIES ---
+// When external option chain data is unavailable, we use mathematically defined proxies:
+// Proxy Gamma = Price Curvature (acceleration)
+// Proxy Theta = Range Volatility Decay (time spent in tight range / ATR decay)
+rangeDecay = (ta.highest(high, 10) - ta.lowest(low, 10)) / (safeAtr * 10.0)
+proxyTheta = -math.max(0.0, 1.0 - rangeDecay)
+
+var float scoreGreeksLong = 50.0
+var float scoreGreeksShort = 50.0
+
+if enableExternalGreeks
+    scoreGreeksLong  := math.min(100.0, math.max(0.0, (extDelta + 1.0) * 50.0 + (extGamma > 0.0 ? 10.0 : 0.0)))
+    scoreGreeksShort := math.min(100.0, math.max(0.0, (1.0 - extDelta) * 50.0 + (extGamma > 0.0 ? 10.0 : 0.0)))
+else
+    scoreGreeksLong  := scoreCurvLong
+    scoreGreeksShort := scoreCurvShort
+
+// --- 12. MARKET STRUCTURE & BREAK OF STRUCTURE (BOS) (STRICT NON-REPAINTING) ---
+// ta.pivothigh / ta.pivotlow only return values after pivotRightBars have elapsed.
+// This introduces zero lookahead bias.
+ph = ta.pivothigh(high, pivotLeftBars, pivotRightBars)
+pl = ta.pivotlow(low, pivotLeftBars, pivotRightBars)
+
+var float lastPivotHigh = na
+var float prevPivotHigh = na
+var float lastPivotLow  = na
+var float prevPivotLow  = na
+
+if not na(ph)
+    prevPivotHigh := lastPivotHigh
+    lastPivotHigh := ph
+
+if not na(pl)
+    prevPivotLow := lastPivotLow
+    lastPivotLow := pl
+
+bullishBos = not na(lastPivotHigh) and ta.crossover(close, lastPivotHigh)
+bearishBos = not na(lastPivotLow)  and ta.crossunder(close, lastPivotLow)
+
+higherHighs = not na(lastPivotHigh) and not na(prevPivotHigh) and (lastPivotHigh > prevPivotHigh)
+higherLows  = not na(lastPivotLow)  and not na(prevPivotLow)  and (lastPivotLow > prevPivotLow)
+lowerHighs  = not na(lastPivotHigh) and not na(prevPivotHigh) and (lastPivotHigh < prevPivotHigh)
+lowerLows   = not na(lastPivotLow)  and not na(prevPivotLow)  and (lastPivotLow < prevPivotLow)
+
+var float scoreStructLong = 0.0
+var float scoreStructShort = 0.0
+scoreStructLong := 0.0
+scoreStructShort := 0.0
+
+if bullishBos
+    scoreStructLong += 50.0
+if higherHighs
+    scoreStructLong += 25.0
+if higherLows
+    scoreStructLong += 25.0
+
+if bearishBos
+    scoreStructShort += 50.0
+if lowerHighs
+    scoreStructShort += 25.0
+if lowerLows
+    scoreStructShort += 25.0
+
+scoreStructLong  := math.min(100.0, math.max(0.0, scoreStructLong))
+scoreStructShort := math.min(100.0, math.max(0.0, scoreStructShort))
+
+// --- 13. KAUFMAN PRICE EFFICIENCY RATIO (ER) ---
+// ER = Net price movement / Sum of individual bar absolute moves
+erNetMove = math.abs(close - nz(close[erLen], close))
+erGrossPath = math.sum(math.abs(close - close[1]), erLen)
+efficiencyRatio = erGrossPath > 0.0 ? (erNetMove / erGrossPath) : 0.0
+
+var float scoreErLong = 0.0
+var float scoreErShort = 0.0
+scoreErLong := 0.0
+scoreErShort := 0.0
+
+if efficiencyRatio >= 0.5
+    if close > close[erLen]
+        scoreErLong := 100.0
+    else
+        scoreErShort := 100.0
+else if efficiencyRatio >= 0.3
+    if close > close[erLen]
+        scoreErLong := 60.0
+    else
+        scoreErShort := 60.0
+else
+    scoreErLong  := 20.0
+    scoreErShort := 20.0
+
+// ============================================================================
+// MARKET REGIME ENGINE (6 REGIMES)
+// ============================================================================
+// 1. Strong Trend
+// 2. Weak Trend
+// 3. Range
+// 4. High Volatility
+// 5. Low Volatility (Squeeze)
+// 6. Transition
+
+var string currentRegime = "Transition"
+var color regimeColor = color.gray
+
+isStrongTrend = adxVal >= 28.0 and efficiencyRatio >= 0.40 and math.abs(trendDistAtr) >= 1.0
+isWeakTrend   = (adxVal >= 18.0 and efficiencyRatio >= 0.25) or (bullishTrendAlign or bearishTrendAlign)
+isHighVol     = atrPercentile >= 80.0 or bbwPercentile >= 85.0
+isLowVol      = isVolSqueeze
+isRange       = adxVal < 20.0 and efficiencyRatio < 0.25 and not isHighVol and not isLowVol
+
+if isHighVol
+    currentRegime := "High Volatility"
+    regimeColor   := color.purple
+else if isLowVol
+    currentRegime := "Low Volatility"
+    regimeColor   := color.blue
+else if isStrongTrend
+    currentRegime := "Strong Trend"
+    regimeColor   := color.green
+else if isWeakTrend
+    currentRegime := "Weak Trend"
+    regimeColor   := color.teal
+else if isRange
+    currentRegime := "Range"
+    regimeColor   := color.orange
+else
+    currentRegime := "Transition"
+    regimeColor   := color.gray
+
+// Adaptive Multipliers based on Regime
+var float effectiveStopMult = baseAtrStopMult
+var float effectiveRr = baseTargetRr
+var float effectiveLongThreshold = longThreshold
+var float effectiveShortThreshold = shortThreshold
+
+effectiveStopMult := baseAtrStopMult
+effectiveRr := baseTargetRr
+effectiveLongThreshold := longThreshold
+effectiveShortThreshold := shortThreshold
+
+if adaptiveRrEnabled
+    if currentRegime == "Strong Trend"
+        effectiveRr := baseTargetRr * 1.35
+        effectiveLongThreshold  -= 3.0
+        effectiveShortThreshold -= 3.0
+    else if currentRegime == "Range"
+        effectiveRr := baseTargetRr * 0.75
+        effectiveLongThreshold  += 3.0
+        effectiveShortThreshold += 3.0
+    else if currentRegime == "High Volatility"
+        effectiveStopMult := baseAtrStopMult * 1.25
+        effectiveLongThreshold  += 4.0
+        effectiveShortThreshold += 4.0
+    else if currentRegime == "Low Volatility"
+        effectiveLongThreshold  += 2.0
+        effectiveShortThreshold += 2.0
+
+// ============================================================================
+// COMPOSITE SCORING MODEL (SEPARATE LONG & SHORT NORMALIZATION 0-100)
+// ============================================================================
+sumWeights = w_trend + w_htf + w_mom + w_adx + w_rsiRegime + w_vwap + w_volume + w_volatility + w_zScore + w_curvature + w_structure + w_er
+safeSumWeights = sumWeights <= 0.0 ? 1.0 : sumWeights
+
+rawLongScore = (
+     scoreTrendLong     * w_trend +
+     scoreHtfLong       * w_htf +
+     scoreMomLong       * w_mom +
+     scoreAdxLong       * w_adx +
+     scoreRsiRegimeLong * w_rsiRegime +
+     scoreVwapLong      * w_vwap +
+     scoreVolLong       * w_volume +
+     (100.0 - atrPercentile) * (w_volatility * 0.5) + (isVolSqueeze ? 50.0 : 0.0) * (w_volatility * 0.5) +
+     scoreZLong         * w_zScore +
+     scoreCurvLong      * w_curvature +
+     scoreStructLong    * w_structure +
+     scoreErLong        * w_er
+ ) / safeSumWeights
+
+rawShortScore = (
+     scoreTrendShort     * w_trend +
+     scoreHtfShort       * w_htf +
+     scoreMomShort       * w_mom +
+     scoreAdxShort       * w_adx +
+     scoreRsiRegimeShort * w_rsiRegime +
+     scoreVwapShort      * w_vwap +
+     scoreVolShort       * w_volume +
+     (100.0 - atrPercentile) * (w_volatility * 0.5) + (isVolSqueeze ? 50.0 : 0.0) * (w_volatility * 0.5) +
+     scoreZShort         * w_zScore +
+     scoreCurvShort      * w_curvature +
+     scoreStructShort    * w_structure +
+     scoreErShort        * w_er
+ ) / safeSumWeights
+
+compositeLongScore  = math.min(100.0, math.max(0.0, rawLongScore))
+compositeShortScore = math.min(100.0, math.max(0.0, rawShortScore))
+
+// ============================================================================
+// TRADE QUALITY & CONFIDENCE FILTERS
+// ============================================================================
+// 1. HTF Anti-Contradiction
+htfLongContradiction  = requireHtfNonOpposite and htfBearish
+htfShortContradiction = requireHtfNonOpposite and htfBullish
+
+// 2. Minimum Volatility / Liquidity Filter
+minAtrSatisfied = atrPct >= minAtrPctFilter
+
+// 3. ADX Filter
+adxFilterSatisfied = (currentRegime == "Range" or currentRegime == "Low Volatility") ? true : (adxVal >= minAdxTrendFilter)
+
+// 4. Date Range Filter
+inDateRange = not enableDateFilter or (time >= startDate and time <= endDate)
+
+// 5. Cooldown Logic
+var int lastExitBar = -100
+var int tradesToday = 0
+var int lastTradeDay = -1
+
+currentDay = dayofmonth(time)
+if currentDay != lastTradeDay
+    tradesToday := 0
+    lastTradeDay := currentDay
+
+cooldownPassed = (bar_index - lastExitBar >= cooldownBars) and (strategy.position_size != 0 or tradesToday < maxTradesPerDay)
+
+// Final Long and Short Signal Triggers
+validLongSignal  = inDateRange and cooldownPassed and minAtrSatisfied and adxFilterSatisfied and not htfLongContradiction and (compositeLongScore >= effectiveLongThreshold) and (compositeLongScore > compositeShortScore + 10.0)
+validShortSignal = inDateRange and cooldownPassed and minAtrSatisfied and adxFilterSatisfied and not htfShortContradiction and (compositeShortScore >= effectiveShortThreshold) and (compositeShortScore > compositeLongScore + 10.0)
+
+// ============================================================================
+// POSITION SIZING ENGINE
+// ============================================================================
+f_calculate_position_size(_stopDist, _score, _threshold) =>
+    float calculatedQty = 0.0
+    if sizingMode == "Risk % of Equity"
+        riskAmountCash = strategy.equity * (riskPerTradePct / 100.0)
+        calculatedQty := _stopDist > 0.0 ? (riskAmountCash / _stopDist) : 0.0
+    else if sizingMode == "% of Equity Capital"
+        capitalAlloc = strategy.equity * (capitalAllocationPct / 100.0)
+        calculatedQty := close > 0.0 ? (capitalAlloc / close) : 0.0
+    else // Fixed Units
+        calculatedQty := fixedUnitsQty
+
+    if enableConfidenceSizing and _score > _threshold
+        float scoreScale = 1.0 + math.min(0.30, ((_score - _threshold) / (100.0 - _threshold)) * 0.30)
+        calculatedQty := calculatedQty * scoreScale
+
+    calculatedQty
+
+// ============================================================================
+// STRATEGY EXECUTION ENGINE & ORDER MANAGEMENT
+// ============================================================================
+var float entryPriceState = na
+var float currentSlPrice  = na
+var float currentTpPrice  = na
+var int   entryBarState   = na
+var bool  isBeActivated   = false
+var bool  isTrailActive   = false
+
+// Check bar confirmation for anti-repainting execution
+isConfirmedBar = barstate.isconfirmed
+
+// Tracking state variables on position change
+if strategy.position_size == 0
+    if strategy.position_size[1] != 0
+        lastExitBar := bar_index
+    entryPriceState := na
+    currentSlPrice  := na
+    currentTpPrice  := na
+    entryBarState   := na
+    isBeActivated   := false
+    isTrailActive   := false
+
+// --- ENTRY LOGIC ---
+if isConfirmedBar and strategy.position_size == 0 and validLongSignal
+    stopDistance = safeAtr * effectiveStopMult
+    entryQty = f_calculate_position_size(stopDistance, compositeLongScore, effectiveLongThreshold)
+    
+    if entryQty > 0.0
+        if entryExecutionType == "Market"
+            strategy.entry("Long", strategy.long, qty = entryQty, comment = "AQMRS Long Entry")
+            entryPriceState := close
+            currentSlPrice  := close - stopDistance
+            currentTpPrice  := close + (stopDistance * effectiveRr)
+            entryBarState   := bar_index
+            tradesToday     += 1
+        else if entryExecutionType == "Breakout"
+            breakoutPrice = ta.highest(high, 3)
+            strategy.entry("Long", strategy.long, qty = entryQty, stop = breakoutPrice, comment = "AQMRS Long Breakout")
+            entryPriceState := breakoutPrice
+            currentSlPrice  := breakoutPrice - stopDistance
+            currentTpPrice  := breakoutPrice + (stopDistance * effectiveRr)
+            entryBarState   := bar_index
+            tradesToday     += 1
+        else if entryExecutionType == "Pullback"
+            pullbackPrice = math.max(emaFast, safeVwap)
+            strategy.entry("Long", strategy.long, qty = entryQty, limit = pullbackPrice, comment = "AQMRS Long Pullback")
+            entryPriceState := pullbackPrice
+            currentSlPrice  := pullbackPrice - stopDistance
+            currentTpPrice  := pullbackPrice + (stopDistance * effectiveRr)
+            entryBarState   := bar_index
+            tradesToday     += 1
+
+if isConfirmedBar and strategy.position_size == 0 and validShortSignal
+    stopDistance = safeAtr * effectiveStopMult
+    entryQty = f_calculate_position_size(stopDistance, compositeShortScore, effectiveShortThreshold)
+    
+    if entryQty > 0.0
+        if entryExecutionType == "Market"
+            strategy.entry("Short", strategy.short, qty = entryQty, comment = "AQMRS Short Entry")
+            entryPriceState := close
+            currentSlPrice  := close + stopDistance
+            currentTpPrice  := close - (stopDistance * effectiveRr)
+            entryBarState   := bar_index
+            tradesToday     += 1
+        else if entryExecutionType == "Breakout"
+            breakoutPrice = ta.lowest(low, 3)
+            strategy.entry("Short", strategy.short, qty = entryQty, stop = breakoutPrice, comment = "AQMRS Short Breakout")
+            entryPriceState := breakoutPrice
+            currentSlPrice  := breakoutPrice + stopDistance
+            currentTpPrice  := breakoutPrice - (stopDistance * effectiveRr)
+            entryBarState   := bar_index
+            tradesToday     += 1
+        else if entryExecutionType == "Pullback"
+            pullbackPrice = math.min(emaFast, safeVwap)
+            strategy.entry("Short", strategy.short, qty = entryQty, limit = pullbackPrice, comment = "AQMRS Short Pullback")
+            entryPriceState := pullbackPrice
+            currentSlPrice  := pullbackPrice + stopDistance
+            currentTpPrice  := pullbackPrice - (stopDistance * effectiveRr)
+            entryBarState   := bar_index
+            tradesToday     += 1
+
+// --- DYNAMIC TRADE MANAGEMENT (TRAILING STOP, BREAK-EVEN, TIME EXITS) ---
+if strategy.position_size > 0
+    if na(entryPriceState)
+        entryPriceState := strategy.position_avg_price
+        currentSlPrice  := entryPriceState - (safeAtr * effectiveStopMult)
+        currentTpPrice  := entryPriceState + ((safeAtr * effectiveStopMult) * effectiveRr)
+        entryBarState   := bar_index
+
+    // Break-even logic
+    if enableBreakEven and not isBeActivated
+        if high >= entryPriceState + (safeAtr * beTriggerAtr)
+            currentSlPrice := math.max(currentSlPrice, entryPriceState + (safeAtr * beOffsetAtr))
+            isBeActivated := true
+
+    // ATR Trailing Stop logic (Chandelier ratcheting)
+    if enableTrailingStop
+        if high >= entryPriceState + (safeAtr * trailActivationAtr)
+            isTrailActive := true
+        if isTrailActive
+            candidateTrail = ta.highest(high, trailLookback) - (safeAtr * trailAtrMult)
+            currentSlPrice := math.max(currentSlPrice, candidateTrail)
+
+    // Momentum collapse / reversal exit
+    if exitOnMomentumCollapse and (ta.crossunder(close, emaMed) or rsiVal < 35.0)
+        strategy.close("Long", comment = "Long Exit: Momentum Collapse")
+    
+    // Opposite high-confidence score exit
+    if exitOnOppositeScore and compositeShortScore >= oppExitScoreThreshold
+        strategy.close("Long", comment = "Long Exit: Opposite High Score")
+
+    // Maximum holding period exit
+    if maxHoldingBars > 0 and not na(entryBarState) and (bar_index - entryBarState >= maxHoldingBars)
+        strategy.close("Long", comment = "Long Exit: Max Holding Bars")
+
+    // Submit OCA Stop Loss and Take Profit orders
+    strategy.exit("Exit Long", from_entry = "Long", stop = currentSlPrice, limit = currentTpPrice, comment_loss = "Long SL Hit", comment_profit = "Long TP Hit")
+
+else if strategy.position_size < 0
+    if na(entryPriceState)
+        entryPriceState := strategy.position_avg_price
+        currentSlPrice  := entryPriceState + (safeAtr * effectiveStopMult)
+        currentTpPrice  := entryPriceState - ((safeAtr * effectiveStopMult) * effectiveRr)
+        entryBarState   := bar_index
+
+    // Break-even logic
+    if enableBreakEven and not isBeActivated
+        if low <= entryPriceState - (safeAtr * beTriggerAtr)
+            currentSlPrice := math.min(currentSlPrice, entryPriceState - (safeAtr * beOffsetAtr))
+            isBeActivated := true
+
+    // ATR Trailing Stop logic
+    if enableTrailingStop
+        if low <= entryPriceState - (safeAtr * trailActivationAtr)
+            isTrailActive := true
+        if isTrailActive
+            candidateTrail = ta.lowest(low, trailLookback) + (safeAtr * trailAtrMult)
+            currentSlPrice := math.min(currentSlPrice, candidateTrail)
+
+    // Momentum collapse / reversal exit
+    if exitOnMomentumCollapse and (ta.crossover(close, emaMed) or rsiVal > 65.0)
+        strategy.close("Short", comment = "Short Exit: Momentum Collapse")
+
+    // Opposite high-confidence score exit
+    if exitOnOppositeScore and compositeLongScore >= oppExitScoreThreshold
+        strategy.close("Short", comment = "Short Exit: Opposite High Score")
+
+    // Maximum holding period exit
+    if maxHoldingBars > 0 and not na(entryBarState) and (bar_index - entryBarState >= maxHoldingBars)
+        strategy.close("Short", comment = "Short Exit: Max Holding Bars")
+
+    // Submit OCA Stop Loss and Take Profit orders
+    strategy.exit("Exit Short", from_entry = "Short", stop = currentSlPrice, limit = currentTpPrice, comment_loss = "Short SL Hit", comment_profit = "Short TP Hit")
+
+// ============================================================================
+// ALERTS (WEBHOOK / AUTOMATION COMPLIANT JSON)
+// ============================================================================
+if isConfirmedBar and validLongSignal and strategy.position_size == 0
+    alertMsgLong = str.format(
+         '{{"strategy":"AQMRS","event":"ENTRY_LONG","symbol":"{0}","tf":"{1}","price":{2,number,#.##},"sl":{3,number,#.##},"tp":{4,number,#.##},"score":{5,number,#.#},"regime":"{6}","adx":{7,number,#.#}}}',
+         syminfo.ticker, timeframe.period, close, close - (safeAtr * effectiveStopMult), close + (safeAtr * effectiveStopMult * effectiveRr), compositeLongScore, currentRegime, adxVal
+     )
+    alert(alertMsgLong, alert.freq_once_per_bar_close)
+
+if isConfirmedBar and validShortSignal and strategy.position_size == 0
+    alertMsgShort = str.format(
+         '{{"strategy":"AQMRS","event":"ENTRY_SHORT","symbol":"{0}","tf":"{1}","price":{2,number,#.##},"sl":{3,number,#.##},"tp":{4,number,#.##},"score":{5,number,#.#},"regime":"{6}","adx":{7,number,#.#}}}',
+         syminfo.ticker, timeframe.period, close, close + (safeAtr * effectiveStopMult), close - (safeAtr * effectiveStopMult * effectiveRr), compositeShortScore, currentRegime, adxVal
+     )
+    alert(alertMsgShort, alert.freq_once_per_bar_close)
+
+// ============================================================================
+// VISUAL OUTPUTS & CHART PLOTTING
+// ============================================================================
+// EMAs
+plot(showEmaLines ? emaFast : na, "Fast EMA", color = color.new(color.teal, 10), linewidth = 1)
+plot(showEmaLines ? emaMed : na,  "Medium EMA", color = color.new(color.orange, 10), linewidth = 2)
+plot(showEmaLines ? emaSlow : na, "Slow EMA", color = color.new(color.blue, 20), linewidth = 2)
+
+// VWAP
+plot(showVwapLine ? safeVwap : na, "VWAP", color = color.new(color.yellow, 20), linewidth = 2)
+
+// Active Stop and Target Lines
+plot(showStopTargetLines and strategy.position_size != 0 ? currentSlPrice : na, "Active Stop Loss", color = color.red, style = plot.style_linebr, linewidth = 2)
+plot(showStopTargetLines and strategy.position_size != 0 ? currentTpPrice : na, "Active Take Profit", color = color.green, style = plot.style_linebr, linewidth = 2)
+
+// Entry Signals
+plotshape(showSignals and isConfirmedBar and validLongSignal and strategy.position_size == 0, "Long Signal Marker", shape.triangleup, location.belowbar, color.green, size = size.normal, text = "LONG")
+plotshape(showSignals and isConfirmedBar and validShortSignal and strategy.position_size == 0, "Short Signal Marker", shape.triangledown, location.abovebar, color.red, size = size.normal, text = "SHORT")
+
+// ============================================================================
+// COMPACT DASHBOARD TABLE (REAL-TIME QUANTITATIVE METRICS)
+// ============================================================================
+var table_pos = dashboardPos == "Top Right" ? position.top_right :
+                 dashboardPos == "Bottom Right" ? position.bottom_right :
+                 dashboardPos == "Top Left" ? position.top_left : position.bottom_left
+
+var table dashTable = table.new(table_pos, 2, 14, bgcolor = color.new(color.black, 15), border_color = color.gray, border_width = 1)
+
+if showDashboard and barstate.islast
+    // Header
+    table.cell(dashTable, 0, 0, "AQMRS QUANT DESK", bgcolor = color.new(color.blue, 20), text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 0, "v6 Production",    bgcolor = color.new(color.blue, 20), text_color = color.white, text_size = size.small)
+
+    // Market Regime
+    table.cell(dashTable, 0, 1, "Market Regime", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 1, currentRegime,    bgcolor = regimeColor, text_color = color.white, text_size = size.small)
+
+    // Scores
+    table.cell(dashTable, 0, 2, "Long Score", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 2, str.format("{0,number,#.#} / 100", compositeLongScore), 
+               bgcolor = compositeLongScore >= effectiveLongThreshold ? color.new(color.green, 30) : color.new(color.gray, 60), 
+               text_color = color.white, text_size = size.small)
+
+    table.cell(dashTable, 0, 3, "Short Score", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 3, str.format("{0,number,#.#} / 100", compositeShortScore), 
+               bgcolor = compositeShortScore >= effectiveShortThreshold ? color.new(color.red, 30) : color.new(color.gray, 60), 
+               text_color = color.white, text_size = size.small)
+
+    // Trend & HTF Trend
+    table.cell(dashTable, 0, 4, "Trend Align", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 4, bullishTrendAlign ? "BULLISH" : (bearishTrendAlign ? "BEARISH" : "MIXED"), 
+               text_color = bullishTrendAlign ? color.green : (bearishTrendAlign ? color.red : color.yellow), text_size = size.small)
+
+    table.cell(dashTable, 0, 5, "HTF Trend (" + htfTimeframe + ")", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 5, htfBullish ? "BULLISH" : (htfBearish ? "BEARISH" : "NEUTRAL"), 
+               text_color = htfBullish ? color.green : (htfBearish ? color.red : color.gray), text_size = size.small)
+
+    // Technical Stats
+    table.cell(dashTable, 0, 6, "ADX (14)", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 6, str.format("{0,number,#.#}", adxVal), text_color = adxVal >= adxTrendLevel ? color.green : color.gray, text_size = size.small)
+
+    table.cell(dashTable, 0, 7, "ATR % (Percentile)", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 7, str.format("{0,number,#.##}% ({1,number,#}%)", atrPct, atrPercentile), text_color = color.white, text_size = size.small)
+
+    table.cell(dashTable, 0, 8, "Price Z-Score", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 8, str.format("{0,number,#.##} σ", zScore), 
+               text_color = math.abs(zScore) >= zScoreReversionBand ? color.orange : color.white, text_size = size.small)
+
+    table.cell(dashTable, 0, 9, "Price Curvature", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 9, str.format("{0,number,#.###}", priceCurvature), 
+               text_color = priceCurvature > 0 ? color.green : color.red, text_size = size.small)
+
+    table.cell(dashTable, 0, 10, "Kaufman ER", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 10, str.format("{0,number,#.##}", efficiencyRatio), 
+               text_color = efficiencyRatio >= 0.4 ? color.green : (efficiencyRatio < 0.2 ? color.orange : color.white), text_size = size.small)
+
+    // Position & Risk
+    string posStr = strategy.position_size > 0 ? "LONG (" + str.tostring(strategy.position_size) + ")" :
+                    strategy.position_size < 0 ? "SHORT (" + str.tostring(strategy.position_size) + ")" : "FLAT"
+    table.cell(dashTable, 0, 11, "Position", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 11, posStr, 
+               bgcolor = strategy.position_size > 0 ? color.new(color.green, 40) : (strategy.position_size < 0 ? color.new(color.red, 40) : color.new(color.gray, 60)), 
+               text_color = color.white, text_size = size.small)
+
+    table.cell(dashTable, 0, 12, "Active SL / TP", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 12, strategy.position_size != 0 ? str.format("{0,number,#.##} / {1,number,#.##}", currentSlPrice, currentTpPrice) : "None", 
+               text_color = color.white, text_size = size.small)
+
+    table.cell(dashTable, 0, 13, "Active R:R", text_color = color.white, text_size = size.small)
+    table.cell(dashTable, 1, 13, str.format("{0,number,#.##} : 1", effectiveRr), text_color = color.white, text_size = size.small)
