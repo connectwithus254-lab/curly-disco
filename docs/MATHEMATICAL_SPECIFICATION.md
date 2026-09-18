@@ -204,3 +204,56 @@ Where $w_k$ are the configurable factor weights:
 A trade is only authorized when:
 $$S_{\text{Long}} \ge \Theta_{\text{Long}}^{\text{effective}} \quad \land \quad S_{\text{Long}} > S_{\text{Short}} + 10$$
 with anti-contradiction, liquidity, and cooldown constraints satisfied.
+
+---
+
+## 4. Cycle Extremum / Turning-Point Quantitative Engine
+
+To identify high-conviction cycle lowest points (troughs) and highest points (crests) without lookahead bias, the strategy evaluates a four-condition confluence filter strictly on bar close:
+
+### 4.1 Statistical Band Exhaustion
+Determines whether price has stretched into the outer tail of its rolling empirical distribution:
+$$\text{Trough Exhaustion}: Z_t \le -Z_{\text{threshold}} \quad \lor \quad L_t \le \text{BB}_{\text{lower}, t}$$
+$$\text{Crest Exhaustion}: Z_t \ge +Z_{\text{threshold}} \quad \lor \quad H_t \ge \text{BB}_{\text{upper}, t}$$
+
+Where $Z_{\text{threshold}} = 1.5\sigma$ and $\text{BB}$ utilizes a 20-period rolling mean and 2.0 standard deviations.
+
+### 4.2 Kinematic Curvature Inflection (Price Acceleration)
+Evaluates whether the deceleration of the decline has ended and upward price acceleration has begun (2nd derivative inflection):
+$$\kappa_t = \text{EMA}\left( \frac{C_t - 2 C_{t-1} + C_{t-2}}{\text{ATR}_t}, 3 \right)$$
+$$\text{Bullish Curvature Turn}: \kappa_t > 0.02 \quad \lor \quad \kappa_t > \kappa_{t-1}$$
+$$\text{Bearish Curvature Turn}: \kappa_t < -0.02 \quad \lor \quad \kappa_t < \kappa_{t-1}$$
+
+### 4.3 Liquidity Absorption Rejection Wicks
+Quantifies institutional order absorption at the candle boundaries:
+$$\text{Lower Wick Ratio} = \frac{\min(O_t, C_t) - L_t}{\max(H_t - L_t, \epsilon)} \ge W_{\min} \quad (\text{default } 25\%)$$
+$$\text{Upper Wick Ratio} = \frac{H_t - \max(O_t, C_t)}{\max(H_t - L_t, \epsilon)} \ge W_{\min} \quad (\text{default } 25\%)$$
+
+### 4.4 Wilder RSI Turning Confirmation
+Confirms that oversold/overbought momentum is turning back toward equilibrium:
+$$\text{Trough Confirmation}: \text{RSI}_t \ge 25.0 \quad \land \quad \text{RSI}_t \ge \text{RSI}_{t-1}$$
+$$\text{Crest Confirmation}: \text{RSI}_t \le 75.0 \quad \land \quad \text{RSI}_t \le \text{RSI}_{t-1}$$
+
+When all four conditions converge, a cycle trough or crest is confirmed, allowing immediate entry at the cycle turning point.
+
+---
+
+## 5. News Catalyst & Macro Event Engine
+
+### 5.1 Shock Detection Formulation
+A high-impact news catalyst or macro event shock is flagged when volume and true range simultaneously undergo extreme statistical expansion:
+$$\text{RVOL}_t = \frac{V_t}{\text{SMA}(V, 20)_t} \ge \Theta_{\text{RVOL}} \quad (\text{default } 2.2\times)$$
+$$\Delta_{\text{Range}, t} = H_t - L_t \ge \Theta_{\text{ATR}} \cdot \text{ATR}_t \quad (\text{default } 1.8\times)$$
+
+$$\text{NewsShock}_t = \mathbf{1}_{\{ \text{RVOL}_t \ge \Theta_{\text{RVOL}} \ \land \ \Delta_{\text{Range}, t} \ge \Theta_{\text{ATR}} \cdot \text{ATR}_t \}}$$
+
+### 5.2 News Reaction Modes
+1. **Fade Overreaction**:
+   - Bottom capitulation: $C_t < C_{t-1} \land \text{Lower Wick Ratio} \ge 35\% \implies \text{Long Entry}$.
+   - Parabolic blow-off: $C_t > C_{t-1} \land \text{Upper Wick Ratio} \ge 35\% \implies \text{Short Entry}$.
+2. **Ride Momentum**:
+   - Institutional continuation: $C_t > C_{t-1} \land \text{Sentiment}_{\text{macro}} \ge 0 \implies \text{Long Entry}$.
+   - Liquidity cascade: $C_t < C_{t-1} \land \text{Sentiment}_{\text{macro}} \le 0 \implies \text{Short Entry}$.
+3. **News Blackout**:
+   - Inhibits all new order submissions during bars where $\text{NewsShock}_t = 1$, shielding the strategy from slippage and spread widening.
+

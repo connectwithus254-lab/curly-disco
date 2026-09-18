@@ -11,7 +11,8 @@ indicator(
 // ============================================================================
 // This indicator mirrors the exact mathematical factors of the AQMRS strategy,
 // plotting the continuous multi-factor quantitative scores, Z-scores, Price Curvature,
-// and Regime states for integration with external CLI, Python, or TypeScript pipelines.
+// Cycle Trough / Crest Turning Points, and News Catalyst Shocks for integration
+// with external CLI, Python, or TypeScript research pipelines.
 
 // --- Inputs ---
 grp_weights = "Multi-Factor Weights"
@@ -27,6 +28,14 @@ w_zScore    = input.float(6.0,  "Weight: Price Z-Score", minval = 0.0, maxval = 
 w_curvature = input.float(6.0,  "Weight: Price Curvature (2nd Deriv)", minval = 0.0, maxval = 50.0, group = grp_weights)
 w_structure = input.float(10.0, "Weight: Market Structure (BOS)", minval = 0.0, maxval = 50.0, group = grp_weights)
 w_er        = input.float(6.0,  "Weight: Kaufman Price Efficiency", minval = 0.0, maxval = 50.0, group = grp_weights)
+
+grp_extremum = "Cycle Extremum & News Catalyst Engine"
+showExtremumShapes = input.bool(true,  "Show Turning-Point Badges", group = grp_extremum)
+showNewsShocks     = input.bool(true,  "Show News Shock Markers", group = grp_extremum)
+extremumZThresh    = input.float(1.5,  "Extremum Z-Score Level", minval = 0.5, step = 0.1, group = grp_extremum)
+minWickPct         = input.float(25.0, "Min Rejection Wick %", minval = 5.0, maxval = 60.0, group = grp_extremum)
+rvolShockThresh    = input.float(2.2,  "News RVOL Shock Threshold", minval = 1.2, step = 0.1, group = grp_extremum)
+atrShockMult       = input.float(1.8,  "News ATR Shock Multiplier", minval = 1.0, step = 0.1, group = grp_extremum)
 
 // --- Engine Core ---
 atrVal = ta.atr(14)
@@ -45,12 +54,14 @@ rsiVal = ta.rsi(close, 14)
 normMom = (close - nz(close[10], close)) / safeAtr
 [diPlus, diMinus, adxVal] = ta.dmi(14, 14)
 
-// Z-Score
+// Z-Score & Bollinger Bands
 zMean = ta.sma(close, 20)
 zStd = ta.stdev(close, 20)
 zScore = zStd > 0.0 ? (close - zMean) / zStd : 0.0
+bbUpper = zMean + 2.0 * zStd
+bbLower = zMean - 2.0 * zStd
 
-// Price Curvature
+// Price Curvature (2nd Derivative Acceleration)
 priceCurvatureRaw = (close - 2.0 * nz(close[1], close) + nz(close[2], close)) / safeAtr
 priceCurvature = ta.ema(priceCurvatureRaw, 3)
 
@@ -59,7 +70,22 @@ erNetMove = math.abs(close - nz(close[10], close))
 erGrossPath = math.sum(math.abs(close - close[1]), 10)
 efficiencyRatio = erGrossPath > 0.0 ? (erNetMove / erGrossPath) : 0.0
 
-// Scores
+// Wick Geometry & Volume Dynamics
+candleRange = math.max(high - low, 1e-6)
+lowerWickPct = ((math.min(open, close) - low) / candleRange) * 100.0
+upperWickPct = ((high - math.max(open, close)) / candleRange) * 100.0
+
+volSma = ta.sma(volume, 20)
+rvol = volSma > 0.0 ? (volume / volSma) : 1.0
+
+// Cycle Bottom / Trough & Cycle Crest / Peak Turning Points
+isBottomTrough = (zScore <= -extremumZThresh or low <= bbLower) and (priceCurvature > 0.02 or priceCurvature > nz(priceCurvature[1], 0.0)) and (lowerWickPct >= minWickPct) and (rsiVal >= 25.0 and rsiVal >= nz(rsiVal[1], rsiVal))
+isTopCrest    = (zScore >= extremumZThresh or high >= bbUpper) and (priceCurvature < -0.02 or priceCurvature < nz(priceCurvature[1], 0.0)) and (upperWickPct >= minWickPct) and (rsiVal <= 75.0 and rsiVal <= nz(rsiVal[1], rsiVal))
+
+// News Catalyst & Macro Event Shock
+isNewsShock   = rvol >= rvolShockThresh and candleRange >= (atrShockMult * safeAtr)
+
+// Multi-Factor Quantitative Composite Scores
 var float scoreTrendLong = 0.0
 var float scoreTrendShort = 0.0
 scoreTrendLong := bullishTrendAlign ? 80.0 : (close > emaMed ? 50.0 : 20.0)
@@ -91,3 +117,8 @@ plot(adxVal, "ADX", color = color.blue, linewidth = 1)
 plot(efficiencyRatio * 100.0, "EfficiencyRatio", color = color.purple, linewidth = 1)
 hline(68, "Signal Threshold", color = color.yellow, linestyle = hline.style_dashed)
 hline(50, "Neutral Line", color = color.gray, linestyle = hline.style_dotted)
+
+// Turning-Point & News Markers
+plotshape(showExtremumShapes and isBottomTrough ? 12.0 : na, title = "Cycle Trough", style = shape.triangleup, location = location.absolute, color = color.lime, size = size.tiny, text = "TROUGH")
+plotshape(showExtremumShapes and isTopCrest ? 88.0 : na, title = "Cycle Crest", style = shape.triangledown, location = location.absolute, color = color.fuchsia, size = size.tiny, text = "CREST")
+plotshape(showNewsShocks and isNewsShock ? 50.0 : na, title = "News Catalyst Shock", style = shape.diamond, location = location.absolute, color = color.yellow, size = size.tiny, text = "NEWS")

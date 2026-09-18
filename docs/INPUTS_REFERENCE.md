@@ -29,19 +29,48 @@ This document details every user-configurable parameter in the **Adaptive Quanti
 
 ---
 
-## 2. Scoring Model Thresholds & Filters
+## 2. Execution Modes & Cycle Turning Points
 | Parameter | Type | Default | Range | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `longThreshold` | Float | `70.0` | `40 - 95` | Minimum composite score required to enter a Long position. |
-| `shortThreshold` | Float | `70.0` | `40 - 95` | Minimum composite score required to enter a Short position. |
-| `requireHtfNonOpposite`| Bool | `true` | `true/false` | Blocks Longs if HTF trend is bearish; blocks Shorts if HTF trend is bullish. |
-| `minAdxTrendFilter` | Float | `18.0` | `0 - 50` | Minimum ADX required for trend entries (bypassed in ranges). |
+| `executionStyle` | String | `"Hybrid (Bottom/Top Extremum + Trends)"` | Options | Strategy execution regime: `Hybrid (Bottom/Top Extremum + Trends)`, `Extremum Reversals (Lowest/Highest Points)`, or `Trend Pullbacks & Breakouts`. |
+| `enableExtremumEngine` | Bool | `true` | `true/false` | Enables cycle trough (lowest point) and cycle crest (highest point) quantitative turning-point engine. |
+| `extremumZThreshold` | Float | `1.5` | `0.5 - 3.5` | Statistical standard deviation threshold from rolling mean for cycle exhaustion. |
+| `minRejectionWickPct` | Float | `25.0%` | `5.0 - 60.0%` | Minimum absorption wick percentage required on turning candle to confirm liquidity rejection. |
+| `longThreshold` | Float | `65.0` | `40 - 95` | Base composite score required to enter a Long position. |
+| `shortThreshold` | Float | `65.0` | `40 - 95` | Base composite score required to enter a Short position. |
+| `requireHtfNonOpposite`| Bool | `true` | `true/false` | Blocks trend Longs if HTF trend is bearish; blocks trend Shorts if HTF trend is bullish (automatically relaxed on high-probability extremum reversals). |
+| `allowBosHtfOverride` | Bool | `true` | `true/false` | Permits Break-of-Structure (BOS) signals to override opposing HTF bias. |
+| `minAdxTrendFilter` | Float | `16.0` | `0 - 50` | Minimum ADX required for trend entries (automatically bypassed in range/mean-reversion regimes). |
 | `minAtrPctFilter` | Float | `0.02%` | `0.0 - 5.0%` | Liquidity filter: prevents trading on flat/frozen markets. |
 | `regimeAdaptiveThresholds`| Bool | `true` | `true/false` | Dynamically raises or lowers entry threshold based on regime risk. |
 
 ---
 
-## 3. Multi-Factor Scoring Weights
+## 3. News Catalyst & Macro Event Engine
+| Parameter | Type | Default | Range | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `enableNewsEngine` | Bool | `true` | `true/false` | Activates high-impact news catalyst and volatility expansion engine. |
+| `newsMode` | String | `"Fade Overreaction"` | Options | News execution strategy: `Fade Overreaction` (buys capitulation news dips, shorts parabolic spikes), `Ride Momentum` (surfs explosive directional news surges), or `News Blackout (Halt)` (halts entries during news turbulence). |
+| `newsVolThreshold` | Float | `2.2` | `1.2 - 6.0` | Minimum Relative Volume ($RVOL = Volume / SMA(Volume, 20)$) defining a news volume surge. |
+| `newsAtrExpansion` | Float | `1.8` | `1.0 - 5.0` | Minimum candle bar range expansion ($Range / ATR$) required to confirm a macro news shock. |
+| `externalNewsSentiment` | Float | `0.0` | `-100 to +100` | External news/macro sentiment score (-100 extremely bearish, +100 extremely bullish). |
+| `enableMacroFilter` | Bool | `false` | `true/false` | Activates inter-market macro filter (e.g. DXY or US10Y correlation). |
+| `macroTicker` | String | `"CAPITALCOM:DXY"`| Symbol | Symbol utilized for macro inter-market directional alignment. |
+
+---
+
+## 4. Visual Display & Chart Label Styling
+| Parameter | Type | Default | Range | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `showEntryLabels` | Bool | `true` | `true/false` | Plots high-contrast entry price tags (`BUY 4410.50`, `SELL 4435.00`) directly above/below the bar. |
+| `showExitLabels` | Bool | `true` | `true/false` | Plots dedicated exit shape markers (`TP`, `SL`) on chart. |
+| `showExitPnL` | Bool | `true` | `true/false` | Stamped PnL badges (`+$320.00`, `-$150.00`) directly adjacent to the exit point. |
+| `showDashboard` | Bool | `true` | `true/false` | Renders on-chart multi-factor HUD table in real time. |
+| `dashboardPosition`| String | `"Top Right"` | Options | Screen position for quantitative dashboard table. |
+
+---
+
+## 5. Multi-Factor Scoring Weights
 | Parameter | Default | Function |
 | :--- | :--- | :--- |
 | `w_trend` | `15.0` | Weight assigned to EMA alignment and slope metrics. |

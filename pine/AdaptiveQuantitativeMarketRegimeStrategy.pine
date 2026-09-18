@@ -1,5 +1,5 @@
 //@version=6
-strategy("Adaptive Quantitative Market Regime Strategy", "AQMRS", overlay = true, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10.0, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 2, pyramiding = 0, calc_on_every_tick = false, max_bars_back = 1000)
+strategy("Adaptive Quantitative Market Regime Strategy", "AQMRS", overlay = true, initial_capital = 100000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10.0, commission_type = strategy.commission.percent, commission_value = 0.05, slippage = 2, pyramiding = 0, calc_on_every_tick = false, max_bars_back = 1000, max_labels_count = 500, max_lines_count = 500)
 
 // ============================================================================
 // ARCHITECTURAL & METHODOLOGICAL SPECIFICATION
@@ -12,22 +12,27 @@ strategy("Adaptive Quantitative Market Regime Strategy", "AQMRS", overlay = true
 // 1. Strict Anti-Repainting: Zero lookahead bias. All Higher-Timeframe (HTF)
 //    security queries strictly fetch confirmed closed bars ([1] offset with
 //    barmerge.lookahead_off). Swing pivots are confirmed strictly after right-bars lag.
-// 2. Anti-Exhaustion & Pullback Discipline: Prevents retail chasing at the peak
-//    of momentum blow-off candles. Entries are gated by distance from equilibrium (ATR
-//    multiples from Fast/Med EMAs), requiring either pullbacks to value or fresh breakouts.
-// 3. Multi-Factor Scoring Engine: Long and Short scores (0-100) are computed
+// 2. Swing Extremum / Turning-Point Engine: Captures cycle bottoms (troughs)
+//    and cycle tops (crests) by detecting volatility band exhaustion (Z <= -1.6 sigma),
+//    second-derivative Price Curvature inflection, institutional absorption wicks,
+//    and RSI momentum rebound, buying/selling at the earliest confirmed reversal point.
+// 3. News Catalyst & Macro Event Engine: Automatically detects high-impact news
+//    shocks via volume expansion anomalies (RVOL >= 2.2x) and range expansion (True Range
+//    >= 1.8x ATR). Offers 3 operating modes: fading news overreactions at extremes,
+//    riding institutional news momentum, or news volatility filtering.
+// 4. Multi-Factor Scoring Engine: Long and Short scores (0-100) are computed
 //    independently across 13 mathematical factors (Trend, HTF, Momentum, ADX,
 //    RSI Regime, VWAP, Volume, Volatility, Z-Score, Price Curvature, Greeks Proxies,
 //    Market Structure BOS, and Kaufman ER).
-// 4. Regime Adaptation: Dynamically transitions risk/reward ratios, stop widths,
+// 5. Regime Adaptation: Dynamically transitions risk/reward ratios, stop widths,
 //    and scoring thresholds across 6 quantified market regimes (Strong Trend,
 //    Weak Trend, High Volatility, Low Volatility/Squeeze, Range, Transition).
-// 5. Dynamic Trade Management: ATR ratchet trailing stop, break-even protection,
+// 6. Dynamic Trade Management: ATR ratchet trailing stop, break-even protection,
 //    and trend reversal exits designed to let winners run while cutting losers quickly.
 // ============================================================================
 
 // ============================================================================
-// 1. STRATEGY & RISK MANAGEMENT INPUTS
+// 1. STRATEGY RISK & POSITION SIZING
 // ============================================================================
 grp_risk = "1. Strategy Risk & Position Sizing"
 sizingMode = input.string("% of Equity Capital", "Position Sizing Mode", options = ["% of Equity Capital", "Risk % of Equity", "Fixed Units"], group = grp_risk, tooltip = "% of Equity Capital is universally compatible across Futures, Crypto, and Stocks.")
@@ -36,6 +41,9 @@ riskPerTradePct = input.float(1.0, "Risk % of Equity per Trade (for Risk Mode)",
 fixedUnitsQty = input.float(1.0, "Fixed Order Units", minval = 0.0001, step = 0.1, group = grp_risk)
 enableConfidenceSizing = input.bool(false, "Enable Score-Weighted Size Scaling", group = grp_risk, tooltip = "Scale position size slightly with higher composite score (max +30%). Default off for strict risk discipline.")
 
+// ============================================================================
+// 2. STOP LOSS, TAKE PROFIT & TRAILING RULES
+// ============================================================================
 grp_stops = "2. Stop Loss, Take Profit & Trailing Rules"
 baseAtrStopMult = input.float(2.0, "Base ATR Stop Loss Multiplier", minval = 0.5, maxval = 10.0, step = 0.1, group = grp_stops)
 baseTargetRr = input.float(2.0, "Base Risk/Reward Ratio", minval = 0.5, maxval = 10.0, step = 0.1, group = grp_stops)
@@ -53,43 +61,61 @@ exitOnOppositeScore = input.bool(true, "Exit on Extreme Opposite Score", group =
 oppExitScoreThreshold = input.float(80.0, "Opposite Exit Score Threshold", minval = 50.0, maxval = 100.0, group = grp_stops)
 
 // ============================================================================
-// 3. SCORING MODEL THRESHOLDS & ANTI-EXHAUSTION FILTERS
+// 3. EXECUTION MODE & SWING EXTREMUM (BOTTOM/TOP) ENGINE
 // ============================================================================
-grp_score = "3. Scoring Model & Anti-Exhaustion Filters"
-longThreshold = input.float(68.0, "Long Entry Score Threshold (0-100)", minval = 40.0, maxval = 95.0, step = 1.0, group = grp_score)
-shortThreshold = input.float(68.0, "Short Entry Score Threshold (0-100)", minval = 40.0, maxval = 95.0, step = 1.0, group = grp_score)
-enableAntiExhaustion = input.bool(true, "Enable Anti-Exhaustion / Anti-Chasing Filter", group = grp_score, tooltip = "Prevents buying at the peak of extended spikes. Blocks Longs when price is > Max Extension ATR above Fast EMA or RSI > 70.")
-maxDistFastAtr = input.float(1.3, "Max Allowed Distance from Fast EMA (ATR)", minval = 0.5, maxval = 3.0, step = 0.1, group = grp_score)
-maxDistMedAtr = input.float(2.2, "Max Allowed Distance from Med EMA (ATR)", minval = 1.0, maxval = 5.0, step = 0.1, group = grp_score)
-maxLongRsi = input.float(70.0, "Max RSI for Long Entries", minval = 50.0, maxval = 90.0, group = grp_score)
-minShortRsi = input.float(30.0, "Min RSI for Short Entries", minval = 10.0, maxval = 50.0, group = grp_score)
-requireHtfNonOpposite = input.bool(true, "HTF Direction Filter", group = grp_score, tooltip = "Filters entries contradictory to higher timeframe bias.")
-allowBosHtfOverride = input.bool(true, "Allow Local BOS to Override HTF Contradiction", group = grp_score, tooltip = "If local timeframe forms a confirmed Break of Structure with momentum, allows trades even if HTF moving average is lagging.")
+grp_mode = "3. Execution Style & Swing Extremum Engine"
+executionStyle = input.string("Hybrid (Bottom/Top Extremum + Trends)", "Execution Style", options = ["Hybrid (Bottom/Top Extremum + Trends)", "Extremum Reversals (Lowest/Highest Points)", "Trend Pullbacks & Breakouts"], group = grp_mode)
+enableExtremumEngine = input.bool(true, "Enable Extremum Turning-Point Engine", group = grp_mode, tooltip = "Detects cycle bottoms (troughs) and tops (crests) using volatility bands, 2nd derivative curvature inflection, and absorption wicks.")
+extremumZThreshold = input.float(1.5, "Extremum Z-Score Reversion Threshold (Std Dev)", minval = 1.0, maxval = 3.0, step = 0.1, group = grp_mode)
+minRejectionWickPct = input.float(25.0, "Minimum Absorption Rejection Wick %", minval = 10.0, maxval = 60.0, step = 5.0, group = grp_mode, tooltip = "Percentage of candle range that must be wick absorption at swing bottom or top.")
+
+// Anti-Exhaustion Gating
+enableAntiExhaustion = input.bool(true, "Enable Anti-Exhaustion Filter for Trends", group = grp_mode, tooltip = "Prevents buying at the peak of extended spikes in trend mode. Requires pullbacks to value.")
+maxDistFastAtr = input.float(1.3, "Max Allowed Distance from Fast EMA (ATR)", minval = 0.5, maxval = 3.0, step = 0.1, group = grp_mode)
+maxDistMedAtr = input.float(2.2, "Max Allowed Distance from Med EMA (ATR)", minval = 1.0, maxval = 5.0, step = 0.1, group = grp_mode)
+maxLongRsi = input.float(70.0, "Max RSI for Long Entries", minval = 50.0, maxval = 90.0, group = grp_mode)
+minShortRsi = input.float(30.0, "Min RSI for Short Entries", minval = 10.0, maxval = 50.0, group = grp_mode)
+
+// ============================================================================
+// 4. NEWS CATALYST & MACRO EVENT ENGINE
+// ============================================================================
+grp_news = "4. News Catalyst & Macro Event Engine"
+enableNewsEngine = input.bool(true, "Enable News Catalyst Detection", group = grp_news, tooltip = "Detects news releases via volume anomalies and ATR range expansion spikes.")
+newsMode = input.string("Fade News Overreaction (Bottom/Top)", "News Event Strategy Mode", options = ["Fade News Overreaction (Bottom/Top)", "Ride News Breakout Momentum", "Halt Trading (News Blackout)"], group = grp_news)
+newsVolThreshold = input.float(2.2, "News Volume Spike Anomaly (x 20-SMA)", minval = 1.5, maxval = 10.0, step = 0.1, group = grp_news)
+newsAtrExpansion = input.float(1.8, "News Candle Range Expansion (x ATR)", minval = 1.2, maxval = 5.0, step = 0.1, group = grp_news)
+externalNewsSentiment = input.float(0.0, "External News Sentiment (-100 to +100)", minval = -100.0, maxval = 100.0, step = 5.0, group = grp_news, tooltip = "Can be set manually or fed dynamically via TradingView webhook alerts / external news bots.")
+enableMacroIntermarket = input.bool(false, "Enable DXY Dollar Macro Filter", group = grp_news, tooltip = "When enabled, queries US Dollar Index (DXY). Weak dollar boosts gold/equity long scores.")
+
+// ============================================================================
+// 5. SCORING MODEL THRESHOLDS & MULTI-FACTOR WEIGHTS
+// ============================================================================
+grp_score = "5. Scoring Thresholds & Multi-Factor Weights"
+longThreshold = input.float(65.0, "Long Entry Score Threshold (0-100)", minval = 40.0, maxval = 95.0, step = 1.0, group = grp_score)
+shortThreshold = input.float(65.0, "Short Entry Score Threshold (0-100)", minval = 40.0, maxval = 95.0, step = 1.0, group = grp_score)
+requireHtfNonOpposite = input.bool(true, "HTF Direction Filter", group = grp_score)
+allowBosHtfOverride = input.bool(true, "Allow Local BOS to Override HTF Contradiction", group = grp_score)
 minAdxTrendFilter = input.float(16.0, "Minimum ADX for Trend Entries", minval = 0.0, maxval = 50.0, group = grp_score)
 minAtrPctFilter = input.float(0.02, "Minimum ATR % of Price (Liquidity Filter)", minval = 0.0, maxval = 5.0, step = 0.01, group = grp_score)
 regimeAdaptiveThresholds = input.bool(true, "Regime-Adaptive Entry Thresholds", group = grp_score)
 
-// ============================================================================
-// 4. MULTI-FACTOR WEIGHTS (LONG & SHORT SCORING)
-// ============================================================================
-grp_weights = "4. Multi-Factor Weights"
-w_trend = input.float(16.0, "Weight: Trend Engine", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_htf = input.float(14.0, "Weight: HTF Trend", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_mom = input.float(14.0, "Weight: Momentum Engine", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_adx = input.float(10.0, "Weight: ADX / Directional", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_rsiRegime = input.float(6.0, "Weight: RSI Regime Context", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_vwap = input.float(6.0, "Weight: VWAP Relationship", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_volume = input.float(6.0, "Weight: Volume & CMF", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_volatility = input.float(6.0, "Weight: Volatility Regime", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_zScore = input.float(6.0, "Weight: Price Z-Score", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_curvature = input.float(6.0, "Weight: Price Curvature (2nd Deriv)", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_structure = input.float(10.0, "Weight: Market Structure (BOS)", minval = 0.0, maxval = 50.0, group = grp_weights)
-w_er = input.float(6.0, "Weight: Kaufman Price Efficiency", minval = 0.0, maxval = 50.0, group = grp_weights)
+w_trend = input.float(16.0, "Weight: Trend Engine", minval = 0.0, maxval = 50.0, group = grp_score)
+w_htf = input.float(14.0, "Weight: HTF Trend", minval = 0.0, maxval = 50.0, group = grp_score)
+w_mom = input.float(14.0, "Weight: Momentum Engine", minval = 0.0, maxval = 50.0, group = grp_score)
+w_adx = input.float(10.0, "Weight: ADX / Directional", minval = 0.0, maxval = 50.0, group = grp_score)
+w_rsiRegime = input.float(6.0, "Weight: RSI Regime Context", minval = 0.0, maxval = 50.0, group = grp_score)
+w_vwap = input.float(6.0, "Weight: VWAP Relationship", minval = 0.0, maxval = 50.0, group = grp_score)
+w_volume = input.float(6.0, "Weight: Volume & CMF", minval = 0.0, maxval = 50.0, group = grp_score)
+w_volatility = input.float(6.0, "Weight: Volatility Regime", minval = 0.0, maxval = 50.0, group = grp_score)
+w_zScore = input.float(6.0, "Weight: Price Z-Score", minval = 0.0, maxval = 50.0, group = grp_score)
+w_curvature = input.float(6.0, "Weight: Price Curvature (2nd Deriv)", minval = 0.0, maxval = 50.0, group = grp_score)
+w_structure = input.float(10.0, "Weight: Market Structure (BOS)", minval = 0.0, maxval = 50.0, group = grp_score)
+w_er = input.float(6.0, "Weight: Kaufman Price Efficiency", minval = 0.0, maxval = 50.0, group = grp_score)
 
 // ============================================================================
-// 5. TECHNICAL INDICATOR PARAMETERS
+// 6. TECHNICAL INDICATORS & ANTI-REPAINT HTF
 // ============================================================================
-grp_ind = "5. Moving Averages & Momentum Parameters"
+grp_ind = "6. Indicators & Higher Timeframe Parameters"
 fastEmaLen = input.int(9, "Fast EMA Length", minval = 2, maxval = 100, group = grp_ind)
 medEmaLen = input.int(50, "Medium EMA Length", minval = 5, maxval = 200, group = grp_ind)
 slowEmaLen = input.int(200, "Slow EMA Length", minval = 20, maxval = 500, group = grp_ind)
@@ -116,12 +142,12 @@ curvatureSmoothLen = input.int(3, "Price Curvature Smoothing EMA", minval = 1, m
 pivotLeftBars = input.int(5, "Pivot Left Bars", minval = 1, maxval = 30, group = grp_ind)
 pivotRightBars = input.int(5, "Pivot Right Bars (Strict Non-Repainting Lag)", minval = 1, maxval = 30, group = grp_ind)
 
-// Cooldown & Limits
-grp_exec = "6. Execution & Cooldown"
-cooldownBars = input.int(5, "Entry Cooldown (Minimum Bars Between Trades)", minval = 0, maxval = 50, group = grp_exec)
-maxTradesPerDay = input.int(4, "Maximum Trades Per Day", minval = 1, maxval = 50, group = grp_exec)
+cooldownBars = input.int(5, "Entry Cooldown (Minimum Bars Between Trades)", minval = 0, maxval = 50, group = grp_ind)
+maxTradesPerDay = input.int(5, "Maximum Trades Per Day", minval = 1, maxval = 50, group = grp_ind)
 
-// Visuals & Styling
+// ============================================================================
+// 7. VISUAL AESTHETICS & DASHBOARD SETTINGS
+// ============================================================================
 grp_visual = "7. Visual Aesthetics & Dashboard"
 showDashboard = input.bool(true, "Show Quantitative Dashboard Table", group = grp_visual)
 dashboardPos = input.string("Bottom Right", "Dashboard Position", options = ["Bottom Right", "Top Right", "Bottom Left", "Top Left"], group = grp_visual)
@@ -130,7 +156,8 @@ showEmaLines = input.bool(true, "Show EMA Trend Lines", group = grp_visual)
 showEmaCloud = input.bool(true, "Show Trend Cloud (Fast-Med EMA)", group = grp_visual)
 showVwapLine = input.bool(true, "Show VWAP Line", group = grp_visual)
 showSignals = input.bool(true, "Show Entry Signal Triangles", group = grp_visual)
-showExitMarkers = input.bool(true, "Show TP / SL / Trail Exit Markers", group = grp_visual)
+showPriceLabels = input.bool(true, "Show Entry Price Labels (BUY / SELL @ Price)", group = grp_visual)
+showExitMarkers = input.bool(true, "Show TP / SL / Trail Exit Badges", group = grp_visual)
 showStopTargetLines = input.bool(true, "Show Active Stop & Target Lines", group = grp_visual)
 
 // ============================================================================
@@ -550,6 +577,68 @@ else if efficiencyRatio >= 0.28
         scoreErShort := 60.0
 
 // ============================================================================
+// 13. SWING EXTREMUM (BOTTOM / TOP) ENGINE
+// ============================================================================
+candleRange = high - low > 0.0 ? high - low : safeAtr
+lowerWick = math.min(open, close) - low
+upperWick = high - math.max(open, close)
+lowerWickPct = (lowerWick / candleRange) * 100.0
+upperWickPct = (upperWick / candleRange) * 100.0
+
+// Cycle Bottom (Trough) Conditions:
+// 1. Extreme low distribution: z-score <= -threshold or piercing lower Bollinger Band
+// 2. Curvature inflection: 2nd derivative flips from downward acceleration to positive deceleration
+// 3. Absorption wick: buyers absorbed selling pressure at the swing bottom
+// 4. RSI oversold rebound: RSI <= 40 and turning upward
+isBottomBandTouch = low <= bbLower or zScore <= -extremumZThreshold
+isBottomCurvInflect = priceCurvature > priceCurvature[1] and priceCurvature[1] < 0.0
+isBottomWickAbsorb = lowerWickPct >= minRejectionWickPct
+isBottomRsiRebound = rsiVal <= 42.0 and rsiVal > rsiVal[1]
+
+isSwingTrough = isBottomBandTouch and (isBottomCurvInflect or isBottomWickAbsorb or isBottomRsiRebound) and close > low[1]
+
+// Cycle Top (Crest) Conditions:
+// 1. Extreme high distribution: z-score >= threshold or piercing upper Bollinger Band
+// 2. Curvature inflection: 2nd derivative flips from upward acceleration to negative deceleration
+// 3. Absorption wick: sellers absorbed buying pressure at the swing crest
+// 4. RSI overbought reversal: RSI >= 58 and turning downward
+isTopBandTouch = high >= bbUpper or zScore >= extremumZThreshold
+isTopCurvInflect = priceCurvature < priceCurvature[1] and priceCurvature[1] > 0.0
+isTopWickAbsorb = upperWickPct >= minRejectionWickPct
+isTopRsiReversal = rsiVal >= 58.0 and rsiVal < rsiVal[1]
+
+isSwingCrest = isTopBandTouch and (isTopCurvInflect or isTopWickAbsorb or isTopRsiReversal) and close < high[1]
+
+// ============================================================================
+// 14. NEWS CATALYST & MACRO EVENT ENGINE
+// ============================================================================
+isNewsVolumeShock = rVol >= newsVolThreshold
+isNewsRangeShock = (high - low) >= (safeAtr * newsAtrExpansion)
+isNewsEvent = enableNewsEngine and (isNewsVolumeShock and isNewsRangeShock)
+
+// News Fade Triggers: Buying the bottom of news panic or shorting the top of news euphoria
+newsFadeBottomBuy = isNewsEvent and isSwingTrough and newsMode == "Fade News Overreaction (Bottom/Top)"
+newsFadeTopSell = isNewsEvent and isSwingCrest and newsMode == "Fade News Overreaction (Bottom/Top)"
+
+// News Momentum Triggers: Riding the breakout shock
+newsMomBullish = isNewsEvent and close > open and (close - low) >= (candleRange * 0.75) and newsMode == "Ride News Breakout Momentum"
+newsMomBearish = isNewsEvent and close < open and (high - close) >= (candleRange * 0.75) and newsMode == "Ride News Breakout Momentum"
+
+// News Blackout Filter
+newsBlackoutActive = isNewsEvent and newsMode == "Halt Trading (News Blackout)"
+
+// External News Sentiment Bias (-100 to +100)
+newsSentimentLongBoost = externalNewsSentiment > 20.0 ? (externalNewsSentiment / 100.0) * 15.0 : 0.0
+newsSentimentShortBoost = externalNewsSentiment < -20.0 ? (math.abs(externalNewsSentiment) / 100.0) * 15.0 : 0.0
+
+// Optional Macro Intermarket Dollar Index (DXY)
+float dxyVal = na
+bool dxyFalling = false
+if enableMacroIntermarket
+    dxyVal := request.security("TVC:DXY", "60", close[1], ignore_invalid_symbol = true)
+    dxyFalling := not na(dxyVal) and dxyVal < nz(dxyVal[1], dxyVal)
+
+// ============================================================================
 // MARKET REGIME ENGINE (6 REGIMES)
 // ============================================================================
 var string currentRegime = "Transition"
@@ -615,34 +704,48 @@ if adaptiveRrEnabled
 sumWeights = w_trend + w_htf + w_mom + w_adx + w_rsiRegime + w_vwap + w_volume + w_volatility + w_zScore + w_curvature + w_structure + w_er
 safeSumWeights = sumWeights <= 0.0 ? 1.0 : sumWeights
 
-rawLongScore = (scoreTrendLong * w_trend + scoreHtfLong * w_htf + scoreMomLong * w_mom + scoreAdxLong * w_adx + scoreRsiRegimeLong * w_rsiRegime + scoreVwapLong * w_vwap + scoreVolLong * w_volume + (100.0 - atrPercentile) * (w_volatility * 0.5) + (isVolSqueeze ? 50.0 : 0.0) * (w_volatility * 0.5) + scoreZLong * w_zScore + scoreCurvLong * w_curvature + scoreStructLong * w_structure + scoreErLong * w_er) / safeSumWeights
-rawShortScore = (scoreTrendShort * w_trend + scoreHtfShort * w_htf + scoreMomShort * w_mom + scoreAdxShort * w_adx + scoreRsiRegimeShort * w_rsiRegime + scoreVwapShort * w_vwap + scoreVolShort * w_volume + (100.0 - atrPercentile) * (w_volatility * 0.5) + (isVolSqueeze ? 50.0 : 0.0) * (w_volatility * 0.5) + scoreZShort * w_zScore + scoreCurvShort * w_curvature + scoreStructShort * w_structure + scoreErShort * w_er) / safeSumWeights
+rawLongScore = (scoreTrendLong * w_trend + scoreHtfLong * w_htf + scoreMomLong * w_mom + scoreAdxLong * w_adx + scoreRsiRegimeLong * w_rsiRegime + scoreVwapLong * w_vwap + scoreVolLong * w_volume + (100.0 - atrPercentile) * (w_volatility * 0.5) + (isVolSqueeze ? 50.0 : 0.0) * (w_volatility * 0.5) + scoreZLong * w_zScore + scoreCurvLong * w_curvature + scoreStructLong * w_structure + scoreErLong * w_er) / safeSumWeights + newsSentimentLongBoost + (dxyFalling ? 5.0 : 0.0)
+rawShortScore = (scoreTrendShort * w_trend + scoreHtfShort * w_htf + scoreMomShort * w_mom + scoreAdxShort * w_adx + scoreRsiRegimeShort * w_rsiRegime + scoreVwapShort * w_vwap + scoreVolShort * w_volume + (100.0 - atrPercentile) * (w_volatility * 0.5) + (isVolSqueeze ? 50.0 : 0.0) * (w_volatility * 0.5) + scoreZShort * w_zScore + scoreCurvShort * w_curvature + scoreStructShort * w_structure + scoreErShort * w_er) / safeSumWeights + newsSentimentShortBoost + (not dxyFalling and not na(dxyVal) ? 5.0 : 0.0)
 
 compositeLongScore = math.min(100.0, math.max(0.0, rawLongScore))
 compositeShortScore = math.min(100.0, math.max(0.0, rawShortScore))
 
 // ============================================================================
-// QUANTITATIVE ENTRY DISCIPLINE & ANTI-EXHAUSTION FILTERS
+// ENTRY TRIGGERS: HYBRID, EXTREMUM (BOTTOM/TOP) & TRENDS
 // ============================================================================
 // HTF Contradiction with BOS Override
-htfLongContradiction = requireHtfNonOpposite and htfBearish and not (allowBosHtfOverride and bullishBos)
-htfShortContradiction = requireHtfNonOpposite and htfBullish and not (allowBosHtfOverride and bearishBos)
+htfLongContradiction = requireHtfNonOpposite and htfBearish and not (allowBosHtfOverride and (bullishBos or isSwingTrough))
+htfShortContradiction = requireHtfNonOpposite and htfBullish and not (allowBosHtfOverride and (bearishBos or isSwingCrest))
 
-// Anti-Exhaustion Gating: do NOT buy the top of a parabolic blow-off!
+// Anti-Exhaustion Gating for trend entries (prevents buying at peak of extended spikes)
 longExhausted = enableAntiExhaustion and (distEmaFastAtr > maxDistFastAtr or distEmaMedAtr > maxDistMedAtr or rsiVal > maxLongRsi or zScore > 2.0)
 shortExhausted = enableAntiExhaustion and (distEmaFastAtr < -maxDistFastAtr or distEmaMedAtr < -maxDistMedAtr or rsiVal < minShortRsi or zScore < -2.0)
 
-// Value Pullback & Breakout Triggers
-longPullbackTrigger = close >= emaFast and low <= emaFast * 1.003 and fastSlopeUp
-longBreakoutTrigger = bullishBos or (isVolSqueeze[1] and close > bbUpper)
-longTriggerValid = longPullbackTrigger or longBreakoutTrigger or (close > safeVwap and vwapSlopeUp)
+// Trend Entry Triggers: Pullback to value or breakout
+trendLongPullback = close >= emaFast and low <= emaFast * 1.003 and fastSlopeUp
+trendLongBreakout = bullishBos or (isVolSqueeze[1] and close > bbUpper)
+trendLongValid = (trendLongPullback or trendLongBreakout or (close > safeVwap and vwapSlopeUp)) and not longExhausted
 
-shortPullbackTrigger = close <= emaFast and high >= emaFast * 0.997 and not fastSlopeUp
-shortBreakoutTrigger = bearishBos or (isVolSqueeze[1] and close < bbLower)
-shortTriggerValid = shortPullbackTrigger or shortBreakoutTrigger or (close < safeVwap and not vwapSlopeUp)
+trendShortPullback = close <= emaFast and high >= emaFast * 0.997 and not fastSlopeUp
+trendShortBreakout = bearishBos or (isVolSqueeze[1] and close < bbLower)
+trendShortValid = (trendShortPullback or trendShortBreakout or (close < safeVwap and not vwapSlopeUp)) and not shortExhausted
+
+// Mode Dispatch:
+bool longEntryTrigger = false
+bool shortEntryTrigger = false
+
+if executionStyle == "Extremum Reversals (Lowest/Highest Points)"
+    longEntryTrigger := (isSwingTrough or newsFadeBottomBuy)
+    shortEntryTrigger := (isSwingCrest or newsFadeTopSell)
+else if executionStyle == "Trend Pullbacks & Breakouts"
+    longEntryTrigger := (trendLongValid or newsMomBullish)
+    shortEntryTrigger := (trendShortValid or newsMomBearish)
+else // "Hybrid (Bottom/Top Extremum + Trends)"
+    longEntryTrigger := isSwingTrough or newsFadeBottomBuy or trendLongValid or newsMomBullish
+    shortEntryTrigger := isSwingCrest or newsFadeTopSell or trendShortValid or newsMomBearish
 
 minAtrSatisfied = atrPct >= minAtrPctFilter
-adxFilterSatisfied = (currentRegime == "Range" or currentRegime == "Low Volatility") ? true : (adxVal >= minAdxTrendFilter)
+adxFilterSatisfied = (currentRegime == "Range" or currentRegime == "Low Volatility" or isSwingTrough or isSwingCrest) ? true : (adxVal >= minAdxTrendFilter)
 
 var int lastExitBar = -100
 var int tradesToday = 0
@@ -656,13 +759,11 @@ if currentDay != lastTradeDay
     lastTradeDay := currentDay
 
 cooldownPassed = (bar_index - lastExitBar >= cooldownBars) and (strategy.position_size != 0 or tradesToday < maxTradesPerDay)
+antiChopLongPassed = na(lastExitPrice) or lastExitDirection != "LONG" or (close < lastExitPrice) or (bar_index - lastExitBar >= cooldownBars * 2) or bullishBos or isSwingTrough
+antiChopShortPassed = na(lastExitPrice) or lastExitDirection != "SHORT" or (close > lastExitPrice) or (bar_index - lastExitBar >= cooldownBars * 2) or bearishBos or isSwingCrest
 
-// Prevent re-entering at the exact same exhausted price level
-antiChopLongPassed = na(lastExitPrice) or lastExitDirection != "LONG" or (close < lastExitPrice) or (bar_index - lastExitBar >= cooldownBars * 2) or bullishBos
-antiChopShortPassed = na(lastExitPrice) or lastExitDirection != "SHORT" or (close > lastExitPrice) or (bar_index - lastExitBar >= cooldownBars * 2) or bearishBos
-
-validLongSignal = cooldownPassed and minAtrSatisfied and adxFilterSatisfied and not htfLongContradiction and not longExhausted and longTriggerValid and antiChopLongPassed and (compositeLongScore >= effectiveLongThreshold) and (compositeLongScore > compositeShortScore + 8.0)
-validShortSignal = cooldownPassed and minAtrSatisfied and adxFilterSatisfied and not htfShortContradiction and not shortExhausted and shortTriggerValid and antiChopShortPassed and (compositeShortScore >= effectiveShortThreshold) and (compositeShortScore > compositeLongScore + 8.0)
+validLongSignal = cooldownPassed and not newsBlackoutActive and minAtrSatisfied and adxFilterSatisfied and not htfLongContradiction and longEntryTrigger and antiChopLongPassed and (compositeLongScore >= effectiveLongThreshold or isSwingTrough) and (compositeLongScore > compositeShortScore + 5.0)
+validShortSignal = cooldownPassed and not newsBlackoutActive and minAtrSatisfied and adxFilterSatisfied and not htfShortContradiction and shortEntryTrigger and antiChopShortPassed and (compositeShortScore >= effectiveShortThreshold or isSwingCrest) and (compositeShortScore > compositeLongScore + 5.0)
 
 // ============================================================================
 // POSITION SIZING ENGINE (UNIVERSAL FUTURES, CRYPTO & EQUITIES)
@@ -680,7 +781,6 @@ f_calculate_position_size(_stopDist, _score, _threshold) =>
         float scoreScale = 1.0 + math.min(0.30, ((_score - _threshold) / (100.0 - _threshold)) * 0.30)
         calculatedQty := calculatedQty * scoreScale
 
-    // Sanitize for contract-based markets
     if syminfo.type == "futures"
         calculatedQty := math.max(1.0, math.round(calculatedQty))
     calculatedQty
@@ -715,23 +815,31 @@ if isConfirmedBar and strategy.position_size == 0 and validLongSignal
     stopDistance = safeAtr * effectiveStopMult
     entryQty = f_calculate_position_size(stopDistance, compositeLongScore, effectiveLongThreshold)
     if entryQty > 0.0
-        strategy.entry("Long", strategy.long, qty = entryQty, comment = "AQMRS Long")
+        string entryReason = isSwingTrough ? "Trough Bottom Buy" : (newsFadeBottomBuy ? "News Fade Buy" : (newsMomBullish ? "News Momentum Buy" : "AQMRS Long"))
+        strategy.entry("Long", strategy.long, qty = entryQty, comment = entryReason)
         entryPriceState := close
         currentSlPrice := close - stopDistance
         currentTpPrice := close + (stopDistance * effectiveRr)
         entryBarState := bar_index
         tradesToday += 1
 
+        if showPriceLabels
+            label.new(bar_index, low - (safeAtr * 0.4), "BUY\n" + str.tostring(close, "#.##"), color = color.new(color.green, 20), textcolor = color.white, style = label.style_label_up, size = size.small)
+
 if isConfirmedBar and strategy.position_size == 0 and validShortSignal
     stopDistance = safeAtr * effectiveStopMult
     entryQty = f_calculate_position_size(stopDistance, compositeShortScore, effectiveShortThreshold)
     if entryQty > 0.0
-        strategy.entry("Short", strategy.short, qty = entryQty, comment = "AQMRS Short")
+        string entryReason = isSwingCrest ? "Crest Top Sell" : (newsFadeTopSell ? "News Fade Sell" : (newsMomBearish ? "News Momentum Sell" : "AQMRS Short"))
+        strategy.entry("Short", strategy.short, qty = entryQty, comment = entryReason)
         entryPriceState := close
         currentSlPrice := close + stopDistance
         currentTpPrice := close - (stopDistance * effectiveRr)
         entryBarState := bar_index
         tradesToday += 1
+
+        if showPriceLabels
+            label.new(bar_index, high + (safeAtr * 0.4), "SELL\n" + str.tostring(close, "#.##"), color = color.new(color.red, 20), textcolor = color.white, style = label.style_label_down, size = size.small)
 
 // --- DYNAMIC TRADE MANAGEMENT (TRAILING STOP, BREAK-EVEN, TIME EXITS) ---
 if strategy.position_size > 0
@@ -822,15 +930,16 @@ fill(p_fast, p_med, color = showEmaCloud ? (emaFast >= emaMed ? color.new(color.
 
 plot(showVwapLine ? safeVwap : na, "VWAP", color = color.new(color.yellow, 25), linewidth = 2)
 
-// Active Stop and Target Lines
+// Active Stop, Target, and Entry Lines
 plot(showStopTargetLines and strategy.position_size != 0 ? currentSlPrice : na, "Active Stop Loss", color = color.red, style = plot.style_linebr, linewidth = 2)
 plot(showStopTargetLines and strategy.position_size != 0 ? currentTpPrice : na, "Active Take Profit", color = color.green, style = plot.style_linebr, linewidth = 2)
+plot(showStopTargetLines and strategy.position_size != 0 ? entryPriceState : na, "Entry Fill Price", color = color.gray, style = plot.style_linebr, linewidth = 1)
 
-// Clean, Sleek Entry Markers (size.small, clean non-overlapping icons)
+// Clean Entry Markers
 plotshape(showSignals and isConfirmedBar and validLongSignal and strategy.position_size == 0, "Long Signal Marker", shape.triangleup, location.belowbar, color.new(color.green, 0), size = size.small)
 plotshape(showSignals and isConfirmedBar and validShortSignal and strategy.position_size == 0, "Short Signal Marker", shape.triangledown, location.abovebar, color.new(color.red, 0), size = size.small)
 
-// Dedicated Exit Markers (Instant visual confirmation of closed trades)
+// Dedicated Exit Markers & Exit Badges
 var int prevClosedTradesCount = 0
 bool tradeJustClosed = strategy.closedtrades > prevClosedTradesCount
 prevClosedTradesCount := strategy.closedtrades
@@ -842,15 +951,21 @@ bool isLossTrade = tradeJustClosed and lastTradeProfit <= 0.0
 plotshape(showExitMarkers and isWinTrade, "Take Profit Exit", shape.circle, location.abovebar, color.new(color.green, 10), size = size.tiny, text = "TP", textcolor = color.white)
 plotshape(showExitMarkers and isLossTrade, "Stop Loss Exit", shape.xcross, location.belowbar, color.new(color.red, 10), size = size.tiny, text = "SL", textcolor = color.white)
 
+if showExitMarkers and tradeJustClosed
+    string exitText = isWinTrade ? "TP +" + str.tostring(lastTradeProfit, "#.##") : "SL " + str.tostring(lastTradeProfit, "#.##")
+    color exitCol = isWinTrade ? color.green : color.red
+    label.new(bar_index, isWinTrade ? high + (safeAtr * 0.3) : low - (safeAtr * 0.3), exitText, color = color.new(exitCol, 20), textcolor = color.white, style = isWinTrade ? label.style_label_down : label.style_label_up, size = size.small)
+
 // ============================================================================
 // QUANTITATIVE DASHBOARD TABLE
 // ============================================================================
-var table dashTable = table.new(position.bottom_right, 2, 12, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 60), border_width = 1)
+var table dashTable = table.new(position.bottom_right, 2, 13, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 60), border_width = 1)
 
 if showDashboard and barstate.islast
     table_pos = dashboardPos == "Top Right" ? position.top_right : dashboardPos == "Top Left" ? position.top_left : dashboardPos == "Bottom Left" ? position.bottom_left : position.bottom_right
     table.set_position(dashTable, table_pos)
     t_size = dashboardTextSize == "Tiny" ? size.tiny : size.small
+
     table.cell(dashTable, 0, 0, "AQMRS QUANT DESK", bgcolor = color.new(color.blue, 30), text_color = color.white, text_size = t_size)
     table.cell(dashTable, 1, 0, "v6 Production", bgcolor = color.new(color.blue, 30), text_color = color.white, text_size = t_size)
 
@@ -863,30 +978,36 @@ if showDashboard and barstate.islast
     table.cell(dashTable, 0, 3, "Short Score", text_color = color.white, text_size = t_size)
     table.cell(dashTable, 1, 3, str.tostring(compositeShortScore, "#.#") + " / 100", bgcolor = compositeShortScore >= effectiveShortThreshold ? color.new(color.red, 30) : color.new(color.gray, 70), text_color = color.white, text_size = t_size)
 
-    table.cell(dashTable, 0, 4, "Trend Bias", text_color = color.white, text_size = t_size)
-    table.cell(dashTable, 1, 4, bullishTrendAlign ? "BULLISH" : (bearishTrendAlign ? "BEARISH" : "MIXED"), text_color = bullishTrendAlign ? color.green : (bearishTrendAlign ? color.red : color.yellow), text_size = t_size)
+    string swingState = isSwingTrough ? "BOTTOM TROUGH" : (isSwingCrest ? "TOP CREST" : "IN SWING")
+    color swingColor = isSwingTrough ? color.green : (isSwingCrest ? color.red : color.gray)
+    table.cell(dashTable, 0, 4, "Swing Extremum", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 1, 4, swingState, bgcolor = color.new(swingColor, 40), text_color = color.white, text_size = t_size)
 
-    table.cell(dashTable, 0, 5, "HTF Trend (" + htfTimeframe + ")", text_color = color.white, text_size = t_size)
-    table.cell(dashTable, 1, 5, htfBullish ? "BULLISH" : (htfBearish ? "BEARISH" : "NEUTRAL"), text_color = htfBullish ? color.green : (htfBearish ? color.red : color.gray), text_size = t_size)
+    string newsState = isNewsEvent ? (newsMode == "Fade News Overreaction (Bottom/Top)" ? "NEWS FADE READY" : "NEWS SHOCK ACTIVE") : (externalNewsSentiment != 0.0 ? "SENTIMENT: " + str.tostring(externalNewsSentiment, "#") : "NORMAL")
+    table.cell(dashTable, 0, 5, "News / Macro Event", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 1, 5, newsState, bgcolor = isNewsEvent ? color.new(color.purple, 30) : color.new(color.gray, 70), text_color = color.white, text_size = t_size)
 
-    table.cell(dashTable, 0, 6, "ADX & ER", text_color = color.white, text_size = t_size)
-    table.cell(dashTable, 1, 6, str.tostring(adxVal, "#.#") + " | " + str.tostring(efficiencyRatio, "#.##"), text_color = adxVal >= adxTrendLevel ? color.green : color.white, text_size = t_size)
+    table.cell(dashTable, 0, 6, "Trend Bias", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 1, 6, bullishTrendAlign ? "BULLISH" : (bearishTrendAlign ? "BEARISH" : "MIXED"), text_color = bullishTrendAlign ? color.green : (bearishTrendAlign ? color.red : color.yellow), text_size = t_size)
 
-    table.cell(dashTable, 0, 7, "ATR % (Rank)", text_color = color.white, text_size = t_size)
-    table.cell(dashTable, 1, 7, str.tostring(atrPct, "#.##") + "% (" + str.tostring(atrPercentile, "#") + "%)", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 0, 7, "HTF Trend (" + htfTimeframe + ")", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 1, 7, htfBullish ? "BULLISH" : (htfBearish ? "BEARISH" : "NEUTRAL"), text_color = htfBullish ? color.green : (htfBearish ? color.red : color.gray), text_size = t_size)
 
-    table.cell(dashTable, 0, 8, "Dist to Fast EMA", text_color = color.white, text_size = t_size)
-    table.cell(dashTable, 1, 8, str.tostring(distEmaFastAtr, "#.##") + " ATR", text_color = math.abs(distEmaFastAtr) > maxDistFastAtr ? color.orange : color.white, text_size = t_size)
+    table.cell(dashTable, 0, 8, "ADX & ER", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 1, 8, str.tostring(adxVal, "#.#") + " | " + str.tostring(efficiencyRatio, "#.##"), text_color = adxVal >= adxTrendLevel ? color.green : color.white, text_size = t_size)
+
+    table.cell(dashTable, 0, 9, "ATR % (Rank)", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 1, 9, str.tostring(atrPct, "#.##") + "% (" + str.tostring(atrPercentile, "#") + "%)", text_color = color.white, text_size = t_size)
 
     string posStr = strategy.position_size > 0 ? "LONG (" + str.tostring(strategy.position_size) + ")" : strategy.position_size < 0 ? "SHORT (" + str.tostring(strategy.position_size) + ")" : "FLAT"
-    table.cell(dashTable, 0, 9, "Active Position", text_color = color.white, text_size = t_size)
-    table.cell(dashTable, 1, 9, posStr, bgcolor = strategy.position_size > 0 ? color.new(color.green, 40) : (strategy.position_size < 0 ? color.new(color.red, 40) : color.new(color.gray, 70)), text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 0, 10, "Active Position", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 1, 10, posStr, bgcolor = strategy.position_size > 0 ? color.new(color.green, 40) : (strategy.position_size < 0 ? color.new(color.red, 40) : color.new(color.gray, 70)), text_color = color.white, text_size = t_size)
 
-    table.cell(dashTable, 0, 10, "Active SL / TP", text_color = color.white, text_size = t_size)
-    table.cell(dashTable, 1, 10, strategy.position_size != 0 ? str.tostring(currentSlPrice, "#.##") + " / " + str.tostring(currentTpPrice, "#.##") : "None", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 0, 11, "Active SL / TP", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 1, 11, strategy.position_size != 0 ? str.tostring(currentSlPrice, "#.##") + " / " + str.tostring(currentTpPrice, "#.##") : "None", text_color = color.white, text_size = t_size)
 
     int closedCount = strategy.closedtrades
     int winCount = strategy.wintrades
     float wrPct = closedCount > 0 ? (winCount / float(closedCount)) * 100.0 : 0.0
-    table.cell(dashTable, 0, 11, "Win Rate (" + str.tostring(closedCount) + " trades)", text_color = color.white, text_size = t_size)
-    table.cell(dashTable, 1, 11, str.tostring(wrPct, "#.#") + "% (" + str.tostring(winCount) + "W / " + str.tostring(closedCount - winCount) + "L)", text_color = wrPct >= 50.0 ? color.green : color.yellow, text_size = t_size)
+    table.cell(dashTable, 0, 12, "Win Rate (" + str.tostring(closedCount) + " trades)", text_color = color.white, text_size = t_size)
+    table.cell(dashTable, 1, 12, str.tostring(wrPct, "#.#") + "% (" + str.tostring(winCount) + "W / " + str.tostring(closedCount - winCount) + "L)", text_color = wrPct >= 50.0 ? color.green : color.yellow, text_size = t_size)

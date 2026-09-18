@@ -130,6 +130,7 @@ export function runStrategyEngine(
     score: number;
     isBeActive: boolean;
     isTrailActive: boolean;
+    entryReason?: string;
   }
 
   let position: ActivePosition | null = null;
@@ -251,21 +252,81 @@ export function runStrategyEngine(
       i - lastExitBar >= params.cooldownBars &&
       (position !== null || tradesToday < params.maxTradesPerDay);
 
-    // HTF Contradiction with BOS Override
+    // Candle Wick Geometry
+    const candleRange = Math.max(c.high - c.low, 1e-6);
+    const lowerWickPct = ((Math.min(c.open, c.close) - c.low) / candleRange) * 100.0;
+    const upperWickPct = ((c.high - Math.max(c.open, c.close)) / candleRange) * 100.0;
+
+    // Cycle Bottom / Trough & Crest / Peak Turning-Point Engine
+    const isBottomTrough =
+      params.enableExtremumEngine &&
+      (zScore[i] <= -params.extremumZThreshold || c.low <= bb.lower[i]) &&
+      (curvature[i] > 0.02 || curvature[i] > (curvature[i - 1] ?? 0.0)) &&
+      lowerWickPct >= params.minRejectionWickPct &&
+      rsi[i] >= 25.0 &&
+      rsi[i] >= (rsi[i - 1] ?? rsi[i]);
+
+    const isTopCrest =
+      params.enableExtremumEngine &&
+      (zScore[i] >= params.extremumZThreshold || c.high >= bb.upper[i]) &&
+      (curvature[i] < -0.02 || curvature[i] < (curvature[i - 1] ?? 0.0)) &&
+      upperWickPct >= params.minRejectionWickPct &&
+      rsi[i] <= 75.0 &&
+      rsi[i] <= (rsi[i - 1] ?? rsi[i]);
+
+    // News Catalyst & Macro Event Engine
+    const isNewsShock =
+      params.enableNewsEngine &&
+      rVol >= params.newsVolThreshold &&
+      candleRange >= params.newsAtrExpansion * safeAtr[i];
+
+    const newsFadeLong =
+      isNewsShock &&
+      params.newsMode === 'Fade Overreaction' &&
+      c.close < (candles[i - 1]?.close ?? c.close) &&
+      lowerWickPct >= 35.0;
+
+    const newsFadeShort =
+      isNewsShock &&
+      params.newsMode === 'Fade Overreaction' &&
+      c.close > (candles[i - 1]?.close ?? c.close) &&
+      upperWickPct >= 35.0;
+
+    const newsMomentumLong =
+      isNewsShock &&
+      params.newsMode === 'Ride Momentum' &&
+      c.close > (candles[i - 1]?.close ?? c.close) &&
+      params.externalNewsSentiment >= 0.0;
+
+    const newsMomentumShort =
+      isNewsShock &&
+      params.newsMode === 'Ride Momentum' &&
+      c.close < (candles[i - 1]?.close ?? c.close) &&
+      params.externalNewsSentiment <= 0.0;
+
+    const isNewsHalt = isNewsShock && params.newsMode === 'Halt Trading';
+
+    // HTF Contradiction with BOS & Extremum Override
     const htfLongContradiction =
       params.requireHtfNonOpposite &&
       htf.htfBearish[i] &&
-      !(params.allowBosHtfOverride && structure.bullishBos[i]);
+      !(params.allowBosHtfOverride && structure.bullishBos[i]) &&
+      !isBottomTrough &&
+      !newsFadeLong;
 
     const htfShortContradiction =
       params.requireHtfNonOpposite &&
       htf.htfBullish[i] &&
-      !(params.allowBosHtfOverride && structure.bearishBos[i]);
+      !(params.allowBosHtfOverride && structure.bearishBos[i]) &&
+      !isTopCrest &&
+      !newsFadeShort;
 
     // Anti-Exhaustion & Anti-Chasing Filter
     const distEmaFastAtr = (c.close - emaFast[i]) / safeAtr[i];
     const longExhausted =
       params.enableAntiExhaustion &&
+      !isBottomTrough &&
+      !newsFadeLong &&
       (distEmaFastAtr > params.maxDistFastAtr ||
         ctx.distEmaMedAtr > params.maxDistMedAtr ||
         rsi[i] > params.maxLongRsi ||
@@ -273,6 +334,8 @@ export function runStrategyEngine(
 
     const shortExhausted =
       params.enableAntiExhaustion &&
+      !isTopCrest &&
+      !newsFadeShort &&
       (distEmaFastAtr < -params.maxDistFastAtr ||
         ctx.distEmaMedAtr < -params.maxDistMedAtr ||
         rsi[i] < params.minShortRsi ||
@@ -283,19 +346,106 @@ export function runStrategyEngine(
       c.close >= emaFast[i] && c.low <= emaFast[i] * 1.003 && emaFast[i] >= emaFast[i - 1];
     const longBreakoutTrigger =
       structure.bullishBos[i] || (isVolSqueeze && c.close > bb.upper[i]);
-    const longTriggerValid =
-      longPullbackTrigger ||
-      longBreakoutTrigger ||
-      (c.close > vwap[i] && vwap[i] >= (vwap[i - 1] ?? vwap[i]));
 
     const shortPullbackTrigger =
       c.close <= emaFast[i] && c.high >= emaFast[i] * 0.997 && emaFast[i] <= emaFast[i - 1];
     const shortBreakoutTrigger =
       structure.bearishBos[i] || (isVolSqueeze && c.close < bb.lower[i]);
-    const shortTriggerValid =
-      shortPullbackTrigger ||
-      shortBreakoutTrigger ||
-      (c.close < vwap[i] && vwap[i] <= (vwap[i - 1] ?? vwap[i]));
+
+    // Route triggers based on Execution Style
+    let longTriggerValid = false;
+    let shortTriggerValid = false;
+    let longEntryReason = 'QUANT_SCORE_LONG';
+    let shortEntryReason = 'QUANT_SCORE_SHORT';
+
+    if (!isNewsHalt) {
+      if (params.executionStyle === 'Extremum Reversals') {
+        if (isBottomTrough) {
+          longTriggerValid = true;
+          longEntryReason = 'CYCLE_BOTTOM_TROUGH';
+        } else if (newsFadeLong) {
+          longTriggerValid = true;
+          longEntryReason = 'NEWS_FADE_LONG';
+        }
+
+        if (isTopCrest) {
+          shortTriggerValid = true;
+          shortEntryReason = 'CYCLE_TOP_CREST';
+        } else if (newsFadeShort) {
+          shortTriggerValid = true;
+          shortEntryReason = 'NEWS_FADE_SHORT';
+        }
+      } else if (params.executionStyle === 'Trend Pullbacks') {
+        if (longPullbackTrigger) {
+          longTriggerValid = true;
+          longEntryReason = 'TREND_PULLBACK_LONG';
+        } else if (longBreakoutTrigger) {
+          longTriggerValid = true;
+          longEntryReason = 'BREAKOUT_LONG';
+        } else if (newsMomentumLong) {
+          longTriggerValid = true;
+          longEntryReason = 'NEWS_MOMENTUM_LONG';
+        } else if (c.close > vwap[i] && vwap[i] >= (vwap[i - 1] ?? vwap[i])) {
+          longTriggerValid = true;
+          longEntryReason = 'VWAP_LONG';
+        }
+
+        if (shortPullbackTrigger) {
+          shortTriggerValid = true;
+          shortEntryReason = 'TREND_PULLBACK_SHORT';
+        } else if (shortBreakoutTrigger) {
+          shortTriggerValid = true;
+          shortEntryReason = 'BREAKDOWN_SHORT';
+        } else if (newsMomentumShort) {
+          shortTriggerValid = true;
+          shortEntryReason = 'NEWS_MOMENTUM_SHORT';
+        } else if (c.close < vwap[i] && vwap[i] <= (vwap[i - 1] ?? vwap[i])) {
+          shortTriggerValid = true;
+          shortEntryReason = 'VWAP_SHORT';
+        }
+      } else {
+        // Hybrid: Both Bottom/Top Extremum + Trend Pullbacks + News
+        if (isBottomTrough) {
+          longTriggerValid = true;
+          longEntryReason = 'CYCLE_BOTTOM_TROUGH';
+        } else if (newsFadeLong) {
+          longTriggerValid = true;
+          longEntryReason = 'NEWS_FADE_LONG';
+        } else if (longPullbackTrigger) {
+          longTriggerValid = true;
+          longEntryReason = 'TREND_PULLBACK_LONG';
+        } else if (longBreakoutTrigger) {
+          longTriggerValid = true;
+          longEntryReason = 'BREAKOUT_LONG';
+        } else if (newsMomentumLong) {
+          longTriggerValid = true;
+          longEntryReason = 'NEWS_MOMENTUM_LONG';
+        } else if (c.close > vwap[i] && vwap[i] >= (vwap[i - 1] ?? vwap[i])) {
+          longTriggerValid = true;
+          longEntryReason = 'VWAP_LONG';
+        }
+
+        if (isTopCrest) {
+          shortTriggerValid = true;
+          shortEntryReason = 'CYCLE_TOP_CREST';
+        } else if (newsFadeShort) {
+          shortTriggerValid = true;
+          shortEntryReason = 'NEWS_FADE_SHORT';
+        } else if (shortPullbackTrigger) {
+          shortTriggerValid = true;
+          shortEntryReason = 'TREND_PULLBACK_SHORT';
+        } else if (shortBreakoutTrigger) {
+          shortTriggerValid = true;
+          shortEntryReason = 'BREAKDOWN_SHORT';
+        } else if (newsMomentumShort) {
+          shortTriggerValid = true;
+          shortEntryReason = 'NEWS_MOMENTUM_SHORT';
+        } else if (c.close < vwap[i] && vwap[i] <= (vwap[i - 1] ?? vwap[i])) {
+          shortTriggerValid = true;
+          shortEntryReason = 'VWAP_SHORT';
+        }
+      }
+    }
 
     // Anti-Chop / Re-entry Protection
     const antiChopLongPassed =
@@ -303,16 +453,22 @@ export function runStrategyEngine(
       lastExitDirection !== 'LONG' ||
       c.close < lastExitPrice ||
       i - lastExitBar >= params.cooldownBars * 2 ||
-      structure.bullishBos[i];
+      structure.bullishBos[i] ||
+      isBottomTrough;
 
     const antiChopShortPassed =
       isNaN(lastExitPrice) ||
       lastExitDirection !== 'SHORT' ||
       c.close > lastExitPrice ||
       i - lastExitBar >= params.cooldownBars * 2 ||
-      structure.bearishBos[i];
+      structure.bearishBos[i] ||
+      isTopCrest;
 
     // Signal Triggers
+    const effectiveLongMin = isBottomTrough ? Math.min(regimeEval.effectiveLongThreshold, 55.0) : regimeEval.effectiveLongThreshold;
+    const effectiveShortMin = isTopCrest ? Math.min(regimeEval.effectiveShortThreshold, 55.0) : regimeEval.effectiveShortThreshold;
+    const minLead = (isBottomTrough || isTopCrest) ? 4.0 : 8.0;
+
     const validLongSignal =
       cooldownPassed &&
       minAtrSatisfied &&
@@ -321,8 +477,8 @@ export function runStrategyEngine(
       !longExhausted &&
       longTriggerValid &&
       antiChopLongPassed &&
-      factorScores.compositeLongScore >= regimeEval.effectiveLongThreshold &&
-      factorScores.compositeLongScore > factorScores.compositeShortScore + 8.0;
+      factorScores.compositeLongScore >= effectiveLongMin &&
+      factorScores.compositeLongScore > factorScores.compositeShortScore + minLead;
 
     const validShortSignal =
       cooldownPassed &&
@@ -332,8 +488,8 @@ export function runStrategyEngine(
       !shortExhausted &&
       shortTriggerValid &&
       antiChopShortPassed &&
-      factorScores.compositeShortScore >= regimeEval.effectiveShortThreshold &&
-      factorScores.compositeShortScore > factorScores.compositeLongScore + 8.0;
+      factorScores.compositeShortScore >= effectiveShortMin &&
+      factorScores.compositeShortScore > factorScores.compositeLongScore + minLead;
 
     // Manage Active Position
     if (position !== null) {
@@ -488,6 +644,7 @@ export function runStrategyEngine(
           rMultiple,
           entryRegime: position.regime,
           entryScore: position.score,
+          entryReason: position.entryReason,
         });
 
         lastExitBar = i;
@@ -545,6 +702,7 @@ export function runStrategyEngine(
             score: factorScores.compositeLongScore,
             isBeActive: false,
             isTrailActive: false,
+            entryReason: longEntryReason,
           };
 
           signals.push({
@@ -609,6 +767,7 @@ export function runStrategyEngine(
             score: factorScores.compositeShortScore,
             isBeActive: false,
             isTrailActive: false,
+            entryReason: shortEntryReason,
           };
 
           signals.push({
@@ -674,6 +833,7 @@ export function runStrategyEngine(
       rMultiple: netPnlCash / (Math.abs(position.entryPrice - position.initialStop) * position.qty),
       entryRegime: position.regime,
       entryScore: position.score,
+      entryReason: position.entryReason,
     });
   }
 

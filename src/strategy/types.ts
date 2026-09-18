@@ -42,14 +42,23 @@ export interface StrategyParameters {
   exitOnOppositeScore: boolean;
   oppExitScoreThreshold: number;
 
-  // 2. Scoring Model Thresholds
+  // 2. Scoring Model & Execution Mode
   longThreshold: number;
   shortThreshold: number;
+  executionStyle: 'Hybrid' | 'Extremum Reversals' | 'Trend Pullbacks';
+  enableExtremumEngine: boolean;
+  extremumZThreshold: number;
+  minRejectionWickPct: number;
   enableAntiExhaustion: boolean;
   maxDistFastAtr: number;
   maxDistMedAtr: number;
   maxLongRsi: number;
   minShortRsi: number;
+  enableNewsEngine: boolean;
+  newsMode: 'Fade Overreaction' | 'Ride Momentum' | 'Halt Trading';
+  newsVolThreshold: number;
+  newsAtrExpansion: number;
+  externalNewsSentiment: number;
   requireHtfNonOpposite: boolean;
   allowBosHtfOverride: boolean;
   minAdxTrendFilter: number;
@@ -150,13 +159,22 @@ export const DEFAULT_STRATEGY_PARAMETERS: StrategyParameters = {
   exitOnOppositeScore: true,
   oppExitScoreThreshold: 80.0,
 
-  longThreshold: 68.0,
-  shortThreshold: 68.0,
+  longThreshold: 65.0,
+  shortThreshold: 65.0,
+  executionStyle: 'Hybrid',
+  enableExtremumEngine: true,
+  extremumZThreshold: 1.5,
+  minRejectionWickPct: 25.0,
   enableAntiExhaustion: true,
   maxDistFastAtr: 1.3,
   maxDistMedAtr: 2.2,
   maxLongRsi: 70.0,
   minShortRsi: 30.0,
+  enableNewsEngine: true,
+  newsMode: 'Fade Overreaction',
+  newsVolThreshold: 2.2,
+  newsAtrExpansion: 1.8,
+  externalNewsSentiment: 0.0,
   requireHtfNonOpposite: true,
   allowBosHtfOverride: true,
   minAdxTrendFilter: 16.0,
@@ -331,6 +349,7 @@ export interface TradeRecord {
   rMultiple: number;
   entryRegime: MarketRegimeType;
   entryScore: number;
+  entryReason?: string;
 }
 
 export interface PerformanceMetrics {

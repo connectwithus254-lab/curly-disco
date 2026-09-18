@@ -24,6 +24,47 @@ describe('Backtest & Metrics Engine', () => {
     expect(res.metrics.maxDrawdownPercent).toBeGreaterThanOrEqual(0);
     expect(res.metrics.winRate).toBeGreaterThanOrEqual(0);
     expect(res.metrics.winRate).toBeLessThanOrEqual(1.0);
+    if (res.trades.length > 0) {
+      expect(typeof res.trades[0].entryReason).toBe('string');
+    }
+  });
+
+  it('supports Extremum Reversals execution mode for bottom and top turning points', () => {
+    const extremumParams = {
+      ...DEFAULT_STRATEGY_PARAMETERS,
+      executionStyle: 'Extremum Reversals' as const,
+      enableExtremumEngine: true,
+      extremumZThreshold: 1.2,
+      minRejectionWickPct: 15.0,
+      longThreshold: 55.0,
+      shortThreshold: 55.0,
+    };
+    const res = runBacktest(candles, extremumParams);
+    expect(res.trades).toBeInstanceOf(Array);
+    expect(res.metrics.finalEquity).toBeGreaterThan(0);
+  });
+
+  it('supports News Catalyst engine with Fade Overreaction and Ride Momentum modes', () => {
+    const newsFadeParams = {
+      ...DEFAULT_STRATEGY_PARAMETERS,
+      enableNewsEngine: true,
+      newsMode: 'Fade Overreaction' as const,
+      newsVolThreshold: 1.5,
+      newsAtrExpansion: 1.2,
+    };
+    const resFade = runBacktest(candles, newsFadeParams);
+    expect(resFade.trades).toBeInstanceOf(Array);
+
+    const newsMomentumParams = {
+      ...DEFAULT_STRATEGY_PARAMETERS,
+      enableNewsEngine: true,
+      newsMode: 'Ride Momentum' as const,
+      newsVolThreshold: 1.5,
+      newsAtrExpansion: 1.2,
+      externalNewsSentiment: 50.0,
+    };
+    const resMom = runBacktest(candles, newsMomentumParams);
+    expect(resMom.trades).toBeInstanceOf(Array);
   });
 
   it('calculates metrics accurately for dummy trade history', () => {

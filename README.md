@@ -4,12 +4,22 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.8-blue)](https://www.typescriptlang.org/)
 [![PineTS Compatible](https://img.shields.io/badge/PineTS-0.9.34-green)](https://github.com/LuxAlgo/PineTS)
 [![pinets-cli](https://img.shields.io/badge/pinets--cli-0.1.15-green)](https://github.com/LuxAlgo/pinets-cli)
-[![Vitest](https://img.shields.io/badge/Tests-25%20Passed-brightgreen)](https://vitest.dev/)
+[![Vitest](https://img.shields.io/badge/Tests-27%20Passed-brightgreen)](https://vitest.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A production-grade, mathematically grounded, non-repainting algorithmic trading system and quantitative research framework for TradingView **Pine Script v6**, **Node.js**, and **TypeScript**.
 
 The objective of this strategy is **not** to curve-fit historical win rates or promise unrealistic 80%+ outcomes. The objective is to construct a scale-free, multi-factor adaptive scoring engine that seeks **positive mathematical expectancy**, **robust parameter plateaus**, and **controllable drawdowns** across non-correlated asset classes (Crypto, Forex, Equities, Commodities).
+
+---
+
+## Key Feature Highlights
+
+- **Visual Chart Clarity**: On-chart high-contrast entry price tags (`BUY 4410.5`, `SELL 4435.0`), dedicated shape markers for `TP` and `SL`, and explicit realized PnL stamps directly adjacent to the exit point (`TP +$320.00`, `SL -$150.00`).
+- **Cycle Extremum / Turning-Point Quantitative Engine**: Mathematically captures local market cycle lowest points (troughs) and highest points (crests) without lookahead bias via statistical distribution exhaustion ($Z \le -1.5\sigma$), kinematic 2nd derivative price curvature inflection, institutional absorption rejection wicks ($\ge 25\%$), and Wilder RSI equilibrium rebound.
+- **News Catalyst & Macro Event Engine**: Real-time detection of high-impact macro news shocks via simultaneous Relative Volume surges ($RVOL \ge 2.2\times$) and ATR range expansion ($\ge 1.8\times$). Supports 3 operational modes: `Fade Overreaction` (buys capitulation news dips / shorts parabolic blow-offs), `Ride Momentum` (surfs institutional conviction with external sentiment confirmation), and `News Blackout (Halt)` (suspends entries during news turbulence).
+- **Execution Styles**: Three user-selectable operating modes: `Hybrid (Bottom/Top Extremum + Trends)`, `Extremum Reversals (Lowest/Highest Points)`, and `Trend Pullbacks & Breakouts`.
+- **Complete Open-Source Research Suite**: Full TypeScript backtester, Walk-Forward Optimizer (WFE), Monte Carlo bootstrap trade resampler, Parameter Sensitivity Plateau evaluator, and `@mathieuc/tradingview` / `pinets-cli` bridge.
 
 ---
 
