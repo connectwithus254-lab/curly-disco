@@ -45,7 +45,13 @@ export interface StrategyParameters {
   // 2. Scoring Model Thresholds
   longThreshold: number;
   shortThreshold: number;
+  enableAntiExhaustion: boolean;
+  maxDistFastAtr: number;
+  maxDistMedAtr: number;
+  maxLongRsi: number;
+  minShortRsi: number;
   requireHtfNonOpposite: boolean;
+  allowBosHtfOverride: boolean;
   minAdxTrendFilter: number;
   minAtrPctFilter: number;
   regimeAdaptiveThresholds: boolean;
@@ -124,7 +130,7 @@ export interface StrategyParameters {
 }
 
 export const DEFAULT_STRATEGY_PARAMETERS: StrategyParameters = {
-  sizingMode: 'Risk % of Equity',
+  sizingMode: '% of Equity Capital',
   riskPerTradePct: 1.0,
   capitalAllocationPct: 10.0,
   fixedUnitsQty: 1.0,
@@ -133,36 +139,42 @@ export const DEFAULT_STRATEGY_PARAMETERS: StrategyParameters = {
   baseTargetRr: 2.0,
   adaptiveRrEnabled: true,
   enableBreakEven: true,
-  beTriggerAtr: 1.5,
-  beOffsetAtr: 0.1,
+  beTriggerAtr: 2.0,
+  beOffsetAtr: 0.15,
   enableTrailingStop: true,
-  trailActivationAtr: 1.5,
-  trailAtrMult: 2.0,
-  trailLookback: 7,
+  trailActivationAtr: 2.2,
+  trailAtrMult: 2.2,
+  trailLookback: 5,
   maxHoldingBars: 120,
   exitOnMomentumCollapse: true,
   exitOnOppositeScore: true,
-  oppExitScoreThreshold: 78.0,
+  oppExitScoreThreshold: 80.0,
 
-  longThreshold: 70.0,
-  shortThreshold: 70.0,
+  longThreshold: 68.0,
+  shortThreshold: 68.0,
+  enableAntiExhaustion: true,
+  maxDistFastAtr: 1.3,
+  maxDistMedAtr: 2.2,
+  maxLongRsi: 70.0,
+  minShortRsi: 30.0,
   requireHtfNonOpposite: true,
-  minAdxTrendFilter: 18.0,
+  allowBosHtfOverride: true,
+  minAdxTrendFilter: 16.0,
   minAtrPctFilter: 0.02,
   regimeAdaptiveThresholds: true,
 
-  w_trend: 15.0,
-  w_htf: 15.0,
-  w_mom: 15.0,
+  w_trend: 16.0,
+  w_htf: 14.0,
+  w_mom: 14.0,
   w_adx: 10.0,
-  w_rsiRegime: 5.0,
-  w_vwap: 5.0,
-  w_volume: 5.0,
-  w_volatility: 5.0,
-  w_zScore: 5.0,
-  w_curvature: 5.0,
+  w_rsiRegime: 6.0,
+  w_vwap: 6.0,
+  w_volume: 6.0,
+  w_volatility: 6.0,
+  w_zScore: 6.0,
+  w_curvature: 6.0,
   w_structure: 10.0,
-  w_er: 5.0,
+  w_er: 6.0,
 
   fastEmaLen: 9,
   medEmaLen: 50,
@@ -207,8 +219,8 @@ export const DEFAULT_STRATEGY_PARAMETERS: StrategyParameters = {
   cmfLen: 20,
 
   entryExecutionType: 'Market',
-  cooldownBars: 3,
-  maxTradesPerDay: 5,
+  cooldownBars: 5,
+  maxTradesPerDay: 4,
   slippageTicks: 2,
   commissionPct: 0.05,
   initialCapital: 100000,

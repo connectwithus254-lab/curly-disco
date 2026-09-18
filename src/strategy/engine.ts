@@ -134,6 +134,8 @@ export function runStrategyEngine(
 
   let position: ActivePosition | null = null;
   let lastExitBar = -100;
+  let lastExitPrice = NaN;
+  let lastExitDirection: OrderDirection | null = null;
   let tradesToday = 0;
   let lastTradeDay = -1;
   let tradeCounter = 0;
@@ -249,8 +251,66 @@ export function runStrategyEngine(
       i - lastExitBar >= params.cooldownBars &&
       (position !== null || tradesToday < params.maxTradesPerDay);
 
-    const htfLongContradiction = params.requireHtfNonOpposite && htf.htfBearish[i];
-    const htfShortContradiction = params.requireHtfNonOpposite && htf.htfBullish[i];
+    // HTF Contradiction with BOS Override
+    const htfLongContradiction =
+      params.requireHtfNonOpposite &&
+      htf.htfBearish[i] &&
+      !(params.allowBosHtfOverride && structure.bullishBos[i]);
+
+    const htfShortContradiction =
+      params.requireHtfNonOpposite &&
+      htf.htfBullish[i] &&
+      !(params.allowBosHtfOverride && structure.bearishBos[i]);
+
+    // Anti-Exhaustion & Anti-Chasing Filter
+    const distEmaFastAtr = (c.close - emaFast[i]) / safeAtr[i];
+    const longExhausted =
+      params.enableAntiExhaustion &&
+      (distEmaFastAtr > params.maxDistFastAtr ||
+        ctx.distEmaMedAtr > params.maxDistMedAtr ||
+        rsi[i] > params.maxLongRsi ||
+        zScore[i] > 2.0);
+
+    const shortExhausted =
+      params.enableAntiExhaustion &&
+      (distEmaFastAtr < -params.maxDistFastAtr ||
+        ctx.distEmaMedAtr < -params.maxDistMedAtr ||
+        rsi[i] < params.minShortRsi ||
+        zScore[i] < -2.0);
+
+    // Value Pullback & Breakout Triggers
+    const longPullbackTrigger =
+      c.close >= emaFast[i] && c.low <= emaFast[i] * 1.003 && emaFast[i] >= emaFast[i - 1];
+    const longBreakoutTrigger =
+      structure.bullishBos[i] || (isVolSqueeze && c.close > bb.upper[i]);
+    const longTriggerValid =
+      longPullbackTrigger ||
+      longBreakoutTrigger ||
+      (c.close > vwap[i] && vwap[i] >= (vwap[i - 1] ?? vwap[i]));
+
+    const shortPullbackTrigger =
+      c.close <= emaFast[i] && c.high >= emaFast[i] * 0.997 && emaFast[i] <= emaFast[i - 1];
+    const shortBreakoutTrigger =
+      structure.bearishBos[i] || (isVolSqueeze && c.close < bb.lower[i]);
+    const shortTriggerValid =
+      shortPullbackTrigger ||
+      shortBreakoutTrigger ||
+      (c.close < vwap[i] && vwap[i] <= (vwap[i - 1] ?? vwap[i]));
+
+    // Anti-Chop / Re-entry Protection
+    const antiChopLongPassed =
+      isNaN(lastExitPrice) ||
+      lastExitDirection !== 'LONG' ||
+      c.close < lastExitPrice ||
+      i - lastExitBar >= params.cooldownBars * 2 ||
+      structure.bullishBos[i];
+
+    const antiChopShortPassed =
+      isNaN(lastExitPrice) ||
+      lastExitDirection !== 'SHORT' ||
+      c.close > lastExitPrice ||
+      i - lastExitBar >= params.cooldownBars * 2 ||
+      structure.bearishBos[i];
 
     // Signal Triggers
     const validLongSignal =
@@ -258,16 +318,22 @@ export function runStrategyEngine(
       minAtrSatisfied &&
       adxFilterSatisfied &&
       !htfLongContradiction &&
+      !longExhausted &&
+      longTriggerValid &&
+      antiChopLongPassed &&
       factorScores.compositeLongScore >= regimeEval.effectiveLongThreshold &&
-      factorScores.compositeLongScore > factorScores.compositeShortScore + 10.0;
+      factorScores.compositeLongScore > factorScores.compositeShortScore + 8.0;
 
     const validShortSignal =
       cooldownPassed &&
       minAtrSatisfied &&
       adxFilterSatisfied &&
       !htfShortContradiction &&
+      !shortExhausted &&
+      shortTriggerValid &&
+      antiChopShortPassed &&
       factorScores.compositeShortScore >= regimeEval.effectiveShortThreshold &&
-      factorScores.compositeShortScore > factorScores.compositeLongScore + 10.0;
+      factorScores.compositeShortScore > factorScores.compositeLongScore + 8.0;
 
     // Manage Active Position
     if (position !== null) {
@@ -310,7 +376,7 @@ export function runStrategyEngine(
           exitReason = 'TAKE_PROFIT';
         } else if (
           params.exitOnMomentumCollapse &&
-          (c.close < emaMed[i] || rsi[i] < 35.0)
+          (c.close < emaMed[i] && emaFast[i] < emaMed[i])
         ) {
           exitPrice = c.close;
           exitReason = 'MOMENTUM_COLLAPSE';
@@ -361,7 +427,7 @@ export function runStrategyEngine(
           exitReason = 'TAKE_PROFIT';
         } else if (
           params.exitOnMomentumCollapse &&
-          (c.close > emaMed[i] || rsi[i] > 65.0)
+          (c.close > emaMed[i] && emaFast[i] > emaMed[i])
         ) {
           exitPrice = c.close;
           exitReason = 'MOMENTUM_COLLAPSE';
@@ -425,6 +491,8 @@ export function runStrategyEngine(
         });
 
         lastExitBar = i;
+        lastExitPrice = finalExitPrice;
+        lastExitDirection = position.direction;
         position = null;
       }
     }
