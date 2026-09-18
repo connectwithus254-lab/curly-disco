@@ -130,7 +130,6 @@ showEmaLines = input.bool(true, "Show EMA Trend Lines", group = grp_visual)
 showEmaCloud = input.bool(true, "Show Trend Cloud (Fast-Med EMA)", group = grp_visual)
 showVwapLine = input.bool(true, "Show VWAP Line", group = grp_visual)
 showSignals = input.bool(true, "Show Entry Signal Triangles", group = grp_visual)
-showSignalLabels = input.bool(false, "Show Signal Text (e.g. LONG/SHORT)", group = grp_visual, tooltip = "Disable to keep chart clean and prevent overlapping text.")
 showExitMarkers = input.bool(true, "Show TP / SL / Trail Exit Markers", group = grp_visual)
 showStopTargetLines = input.bool(true, "Show Active Stop & Target Lines", group = grp_visual)
 
@@ -828,15 +827,15 @@ plot(showStopTargetLines and strategy.position_size != 0 ? currentSlPrice : na, 
 plot(showStopTargetLines and strategy.position_size != 0 ? currentTpPrice : na, "Active Take Profit", color = color.green, style = plot.style_linebr, linewidth = 2)
 
 // Clean, Sleek Entry Markers (size.small, clean non-overlapping icons)
-plotshape(showSignals and isConfirmedBar and validLongSignal and strategy.position_size == 0, "Long Signal Marker", shape.triangleup, location.belowbar, color.new(color.green, 0), size = size.small, text = showSignalLabels ? "LONG" : "")
-plotshape(showSignals and isConfirmedBar and validShortSignal and strategy.position_size == 0, "Short Signal Marker", shape.triangledown, location.abovebar, color.new(color.red, 0), size = size.small, text = showSignalLabels ? "SHORT" : "")
+plotshape(showSignals and isConfirmedBar and validLongSignal and strategy.position_size == 0, "Long Signal Marker", shape.triangleup, location.belowbar, color.new(color.green, 0), size = size.small)
+plotshape(showSignals and isConfirmedBar and validShortSignal and strategy.position_size == 0, "Short Signal Marker", shape.triangledown, location.abovebar, color.new(color.red, 0), size = size.small)
 
 // Dedicated Exit Markers (Instant visual confirmation of closed trades)
 var int prevClosedTradesCount = 0
 bool tradeJustClosed = strategy.closedtrades > prevClosedTradesCount
 prevClosedTradesCount := strategy.closedtrades
 
-float lastTradeProfit = tradeJustClosed ? strategy.closedtrades.profit(strategy.closedtrades - 1) : 0.0
+float lastTradeProfit = (tradeJustClosed and strategy.closedtrades > 0) ? strategy.closedtrades.profit(math.max(0, strategy.closedtrades - 1)) : 0.0
 bool isWinTrade = tradeJustClosed and lastTradeProfit > 0.0
 bool isLossTrade = tradeJustClosed and lastTradeProfit <= 0.0
 
@@ -846,11 +845,12 @@ plotshape(showExitMarkers and isLossTrade, "Stop Loss Exit", shape.xcross, locat
 // ============================================================================
 // QUANTITATIVE DASHBOARD TABLE
 // ============================================================================
-var table_pos = dashboardPos == "Top Right" ? position.top_right : dashboardPos == "Bottom Right" ? position.bottom_right : dashboardPos == "Top Left" ? position.top_left : position.bottom_left
-var table dashTable = table.new(table_pos, 2, 12, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 60), border_width = 1)
-var t_size = dashboardTextSize == "Tiny" ? size.tiny : size.small
+var table dashTable = table.new(position.bottom_right, 2, 12, bgcolor = color.new(color.black, 15), border_color = color.new(color.gray, 60), border_width = 1)
 
 if showDashboard and barstate.islast
+    table_pos = dashboardPos == "Top Right" ? position.top_right : dashboardPos == "Top Left" ? position.top_left : dashboardPos == "Bottom Left" ? position.bottom_left : position.bottom_right
+    table.set_position(dashTable, table_pos)
+    t_size = dashboardTextSize == "Tiny" ? size.tiny : size.small
     table.cell(dashTable, 0, 0, "AQMRS QUANT DESK", bgcolor = color.new(color.blue, 30), text_color = color.white, text_size = t_size)
     table.cell(dashTable, 1, 0, "v6 Production", bgcolor = color.new(color.blue, 30), text_color = color.white, text_size = t_size)
 
