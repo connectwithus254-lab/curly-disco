@@ -15,7 +15,7 @@ function cookie(name) {
     .map((c) => decodeURIComponent(c.slice(name.length + 1)))[0];
 }
 
-async function api(method, path, body) {
+async function api(method, path, body, retried) {
   const headers = {};
   if (body !== undefined) headers['content-type'] = 'application/json';
   const csrf = cookie('bs_csrf');
@@ -29,11 +29,35 @@ async function api(method, path, body) {
   const text = await res.text();
   const data = text ? JSON.parse(text) : {};
   if (!res.ok) {
-    const message = (data.error && data.error.message) || res.statusText;
-    const problems = data.error && data.error.details && data.error.details.problems;
-    throw new Error(problems ? `${message}: ${problems.join('; ')}` : message);
+    const error = data.error || {};
+    // A stale/missing security token (e.g. the preview iframe dropped the cookie, or the page was
+    // left open across a restart) is recoverable: refresh it once and replay the request.
+    if (res.status === 403 && error.code === 'csrf_failed' && !retried) {
+      try {
+        await fetch('/api/v1/meta', { credentials: 'same-origin' });
+      } catch {
+        /* ignore */
+      }
+      return api(method, path, body, true);
+    }
+    const problems = error.details && error.details.problems;
+    const message = problems ? `${error.message}: ${problems.join('; ')}` : error.message || res.statusText;
+    const failure = new Error(message);
+    failure.code = error.code;
+    throw failure;
   }
   return data;
+}
+
+/** The wizard and every shop-scoped action needs a saved shop; never crash, always explain. */
+function requireShop() {
+  const shop = state.shops[0];
+  if (shop) return shop;
+  toast('No shop yet — fill in step 1 and press “Save & continue” first.', 'error');
+  state.step = 1;
+  show('wizard');
+  renderWizard();
+  return null;
 }
 
 function toast(message, kind) {
@@ -241,7 +265,17 @@ function renderBotSummary() {
 }
 
 async function refreshDashboard() {
-  if (state.shops.length === 0) return;
+  if (state.shops.length === 0) {
+    const metrics = document.getElementById('metrics');
+    if (metrics) {
+      metrics.textContent = '';
+      const p = document.createElement('p');
+      p.className = 'muted';
+      p.textContent = 'No shop yet — open the setup wizard to create one.';
+      metrics.append(p);
+    }
+    return;
+  }
   try {
     const data = await api('GET', '/api/v1/dashboard');
     state.dashboard = data;
@@ -306,17 +340,69 @@ function renderWizard() {
   });
   document.getElementById('wizard-next').hidden = state.step >= 6;
   document.getElementById('wizard-launch').hidden = state.step !== 6;
-  if (state.step === 4) document.getElementById('demo-token-hint').textContent = demoTokenHint();
-  if (state.step === 3 && state.shops[0]) fillForm(state.shops[0]);
-  if (state.step === 2 && state.shops[0]) {
-    const shop = state.shops[0];
+
+  // Prefill from the saved shop on every step, so revisiting a step never shows empty fields
+  // (and re-saving can therefore never wipe data that was entered earlier).
+  const shop = state.shops[0];
+  if (shop) fillForm(shop);
+  if (state.step === 2 && shop) {
     const form = document.getElementById('wizard-form');
     form.defaultLocale.value = shop.defaultLocale || 'en';
-    (shop.supportedLocales || ['en']).forEach((code) => {
-      const box = form['locale_' + code];
-      if (box) box.checked = true;
+    ['en', 'sw', 'ru'].forEach((code) => {
+      if (form['locale_' + code]) form['locale_' + code].checked = (shop.supportedLocales || ['en']).includes(code);
     });
   }
+  if (state.step === 4) {
+    document.getElementById('demo-token-hint').textContent = demoTokenHint();
+    renderBotStep();
+  }
+}
+
+/** Step 4: show whether a bot is already connected, and let the seller replace it. */
+function renderBotStep() {
+  const shop = state.shops[0];
+  const box = document.getElementById('bot-result');
+  box.textContent = '';
+  if (!shop) return;
+  const bot = state.bots.find((b) => b.shopId === shop.id && b.status !== 'revoked');
+  if (!bot) return;
+
+  const line = document.createElement('p');
+  line.append(badge(bot.status, bot.status === 'active' ? 'ok' : bot.status === 'error' ? 'bad' : 'warn'));
+  const detail = document.createElement('span');
+  detail.textContent = `  ${bot.username ? '@' + bot.username : 'unnamed bot'} · ${bot.mode} · token ${bot.tokenLast4}`;
+  line.append(detail);
+  box.append(line);
+
+  const actions = document.createElement('div');
+  actions.className = 'row';
+  const check = document.createElement('button');
+  check.type = 'button';
+  check.textContent = 'Run health check';
+  check.addEventListener('click', () => runBotCheck(bot.id));
+  const disconnect = document.createElement('button');
+  disconnect.type = 'button';
+  disconnect.textContent = 'Disconnect (to use a different bot)';
+  disconnect.addEventListener('click', () => disconnectBot(bot.id));
+  actions.append(check, disconnect);
+  box.append(actions);
+}
+
+async function runBotCheck(botId) {
+  const result = await api('POST', `/api/v1/bots/${botId}/check`);
+  toast(result.healthy ? 'Bot is healthy' : 'Bot problem: ' + result.error, result.healthy ? 'ok' : 'error');
+  state.bots = (await api('GET', '/api/v1/bots')).bots;
+  renderBotStep();
+  renderBotSummary();
+}
+
+async function disconnectBot(botId) {
+  if (!confirm('Disconnect this bot? The shop stops answering until you connect one again.')) return;
+  await api('DELETE', `/api/v1/bots/${botId}`);
+  state.bots = (await api('GET', '/api/v1/bots')).bots;
+  toast('Bot disconnected', 'ok');
+  renderBotStep();
+  renderBotSummary();
 }
 
 function fillForm(shop) {
@@ -382,13 +468,17 @@ document.getElementById('wizard-form').addEventListener('submit', async (event) 
       }
       await api('PATCH', `/api/v1/shops/${state.shops[0].id}`, payload);
     } else if (state.step === 2) {
+      const shop = requireShop();
+      if (!shop) return;
       const supported = ['en', 'sw', 'ru'].filter((code) => form['locale_' + code].checked);
-      await api('PATCH', `/api/v1/shops/${state.shops[0].id}`, {
+      await api('PATCH', `/api/v1/shops/${shop.id}`, {
         defaultLocale: form.defaultLocale.value,
         supportedLocales: supported.length > 0 ? supported : ['en'],
       });
     } else if (state.step === 3) {
-      await api('PATCH', `/api/v1/shops/${state.shops[0].id}`, {
+      const shop = requireShop();
+      if (!shop) return;
+      await api('PATCH', `/api/v1/shops/${shop.id}`, {
         rulesMd: form.rulesMd.value || null,
         refundPolicyMd: form.refundPolicyMd.value || null,
         deliveryPolicyMd: form.deliveryPolicyMd.value || null,
@@ -399,7 +489,6 @@ document.getElementById('wizard-form').addEventListener('submit', async (event) 
     state.shops = (await api('GET', '/api/v1/shops')).shops;
     state.step = Math.min(6, state.step + 1);
     renderWizard();
-    if (state.step === 4) document.getElementById('demo-token-hint').textContent = demoTokenHint();
     toast('Saved', 'ok');
   } catch (error) {
     toast(error.message, 'error');
@@ -409,11 +498,18 @@ document.getElementById('wizard-form').addEventListener('submit', async (event) 
 document.getElementById('connect-bot').addEventListener('click', async () => {
   const form = document.getElementById('wizard-form');
   const box = document.getElementById('bot-result');
+  const shop = requireShop();
+  if (!shop) return;
+  const token = form.botToken.value.trim();
+  if (token.length < 20) {
+    toast('Paste the full token from @BotFather (it looks like 123456789:AA…)', 'error');
+    return;
+  }
   box.textContent = 'Connecting…';
   try {
     const result = await api('POST', '/api/v1/bots/connect', {
-      shopId: state.shops[0].id,
-      token: form.botToken.value.trim(),
+      shopId: shop.id,
+      token,
       mode: form.botMode.value,
     });
     state.bots = (await api('GET', '/api/v1/bots')).bots;
@@ -426,7 +522,9 @@ document.getElementById('connect-bot').addEventListener('click', async () => {
         ? `Connected as @${result.bot.username}. Open Telegram and send /start to it.`
         : `Telegram rejected the connection: ${result.bot.lastError}`;
     box.append(ok, text);
+    form.botToken.value = '';
     toast('Bot connected', 'ok');
+    renderBotStep();
   } catch (error) {
     box.textContent = '';
     toast(error.message, 'error');
@@ -439,8 +537,10 @@ document.getElementById('connect-bot').addEventListener('click', async () => {
 
 document.getElementById('wizard-launch').addEventListener('click', async () => {
   const box = document.getElementById('launch-result');
+  const shop = requireShop();
+  if (!shop) return;
   try {
-    const result = await api('POST', `/api/v1/shops/${state.shops[0].id}/launch`);
+    const result = await api('POST', `/api/v1/shops/${shop.id}/launch`);
     state.shops = (await api('GET', '/api/v1/shops')).shops;
     box.textContent = '';
     const p = document.createElement('p');
@@ -465,8 +565,8 @@ document.querySelectorAll('[data-preview]').forEach((btn) =>
       support: 'su:support',
       help: 'm:help',
     };
-    const shop = state.shops[0];
-    if (!shop) return toast('Create a shop first', 'error');
+    const shop = requireShop();
+    if (!shop) return;
     try {
       const body = { shopId: shop.id };
       if (map[btn.dataset.preview]) body.callbackData = map[btn.dataset.preview];
@@ -498,7 +598,10 @@ function renderPhone(preview) {
 
 async function simulate(text, callbackData) {
   const shop = state.shops[0];
-  if (!shop) return;
+  if (!shop) {
+    toast('Create your shop first (setup wizard, step 1).', 'error');
+    return;
+  }
   try {
     const body = { shopId: shop.id };
     if (text) body.text = text;

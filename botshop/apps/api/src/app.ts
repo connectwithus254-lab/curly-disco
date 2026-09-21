@@ -7,7 +7,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { ZodError } from 'zod';
 import { ERRORS, type ApiError } from '@botshop/shared';
 import { randomBytes } from 'node:crypto';
-import { checkCsrf, CSRF_COOKIE, readCookie } from './auth.ts';
+import { checkCsrf, CSRF_COOKIE, readCookie, type RequestWithActor } from './auth.ts';
 import { getRequestActor, type AuthServiceInstance } from './request-context.ts';
 import { registerAuthRoutes } from './routes/auth-routes.ts';
 import { registerBotRoutes } from './routes/bot-routes.ts';
@@ -103,7 +103,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.addHook('preHandler', async (request) => {
     if (!request.url.startsWith('/api/')) return;
     if (['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())) return;
-    checkCsrf(request);
+    checkCsrf(request, (request as RequestWithActor).actor ?? null);
   });
 
   await registerSystemRoutes(app, options);

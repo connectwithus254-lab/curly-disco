@@ -100,7 +100,7 @@ Click **Setup wizard** in the top bar and go through the six steps:
 | 1 · Business identity | name, category, currency, country, timezone, contact | currency/country are free text — set what your customers use |
 | 2 · Languages | default language + which ones are enabled | customers get a picker if you enable more than one |
 | 3 · Policies & support | rules, refund policy, delivery policy, support hours, **staff chat id** | staff chat id is optional — see the box below |
-| 4 · Connect bot | a Telegram bot token (see A6) | in local demo mode any token shaped `123456789:AA…` is accepted |
+| 4 · Connect bot | a Telegram bot token (see A6) | in demo mode (`TELEGRAM_MODE=fake`) any token shaped `123456789:AA…` is accepted — it is *not* verified against Telegram. Real tokens are only validated when `TELEGRAM_MODE=live` |
 | 5 · Preview | click *Main menu*, *Rules*, … | this is the **real** rendering code, not a mock-up |
 | 6 · Launch | click **Launch shop** | it checks prerequisites and tells you what is missing |
 
@@ -281,6 +281,10 @@ Differences from a real deployment: `TELEGRAM_MODE=fake`, so no messages leave t
 safe for exploring: connect a bot with any token shaped `123456789:AA…`, click through the wizard,
 simulate updates, watch the dashboard counters move. Nothing here survives a restart.
 
+> **A token pasted in demo mode is not a real connection.** Telegram is never contacted, so your
+> bot will not answer real messages from here. To make a BotFather token actually work, run the
+> platform with `TELEGRAM_MODE=live` (Path A step A6 or Path B step B4).
+
 ---
 
 ## How to configure it
@@ -368,7 +372,9 @@ telegram plumbing end to end. Payments are the next slice — they need your dec
 | Panel won't load at all | stack not running / wrong URL | `docker compose ps`, then `docker compose logs -f app` |
 | `503` on `/healthz`, logs say `db: down` | wrong `POSTGRES_PASSWORD` vs `DATABASE_*_URL`, or DB still starting | check `.env` consistency, then `docker compose restart app` |
 | Login says *Incorrect email or password* | account created in a different workspace, or wrong password | use the workspace slug field; re-create the workspace if needed |
-| `403 CSRF check failed` in an API script | missing CSRF header | read the `bs_csrf` cookie and send it as `X-CSRF-Token` |
+| Panel says **“Security check failed”** (previously “CSRF check failed”) | the page's security token is stale — usually a panel left open across a restart, or a browser/privacy setting that drops one of the cookies in an embedded preview | reload the page. The panel now refreshes the token by itself and retries once; if it persists, check `docker compose logs app` for the `CSRF check failed` line, which prints what was missing |
+| **“Cannot read properties of undefined (reading 'id')”** | an action that needs a saved shop was clicked before step 1 was saved (older panel versions crashed instead of explaining) | reload the panel; it now says *“No shop yet — fill in step 1 and press Save & continue”* instead |
+| **“This shop already has a bot connected”** | a bot is already attached to that shop | wizard step 4 → **Disconnect**, then connect the new token (you no longer have to delete anything) |
 | Bot does not answer `/start` | wrong mode, dead webhook, or token rotated in BotFather | panel → bot → **Run health check**; check `getWebhookInfo`; use polling if unsure |
 | Webhook 403 `missing secret token` | Telegram wasn't told the secret, or another service overwrote the webhook | *Run health check* re-registers it |
 | `https://` certificate errors | DNS not pointing yet, or port 80/443 blocked | `docker compose logs caddy`, verify the A record and firewall |

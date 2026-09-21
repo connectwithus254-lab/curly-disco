@@ -130,15 +130,26 @@ export async function registerBotRoutes(app: FastifyInstance, deps: RouteDeps): 
     const finalBot = await db.withTenant(
       actor.tenantId,
       async (tx) => {
-        const updated =
-          status === 'active'
-            ? await repo.markBotVerified(tx, bot.id, {
-                telegramBotId: String(me.id),
-                username: me.username ?? '',
-                displayName: me.first_name,
-                webhookUrl,
-              })
-            : await repo.markBotError(tx, bot.id, lastError ?? 'unknown error');
+        let updated: repo.BotRow | null;
+        if (status === 'active') {
+          try {
+            updated = await repo.markBotVerified(tx, bot.id, {
+              telegramBotId: String(me.id),
+              username: me.username ?? '',
+              displayName: me.first_name,
+              webhookUrl,
+            });
+          } catch (error) {
+            if ((error as { code?: string }).code === '23505') {
+              throw ERRORS.conflict(
+                `@${me.username ?? 'that bot'} is already connected to another shop in this workspace`,
+              );
+            }
+            throw error;
+          }
+        } else {
+          updated = await repo.markBotError(tx, bot.id, lastError ?? 'unknown error');
+        }
         await repo.writeAudit(tx, {
           tenantId: actor.tenantId,
           actorType: 'user',

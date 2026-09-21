@@ -82,8 +82,13 @@ async function main() {
     LOG_LEVEL: process.env.LOG_LEVEL ?? 'info',
   };
 
-  if (process.env.RESET !== 'false') {
-    console.log('[dev] applying migrations and seeding demo data…');
+  if (process.env.RESET === 'false') {
+    // Keep existing data: apply pending migrations only (additive, forward-only).
+    console.log('[dev] applying pending migrations (RESET=false — your data is kept)…');
+    await run('npx', ['tsx', 'packages/db/src/cli.ts', 'migrate'], env);
+  } else {
+    console.log('[dev] resetting schema, applying migrations and seeding demo data…');
+    console.log('[dev] (set RESET=false to keep your data across restarts)');
     await run('npx', ['tsx', 'packages/db/src/cli.ts', 'reset'], env);
   }
 

@@ -31,19 +31,20 @@ const loginSchema = z.object({
 });
 
 /**
- * Never rotate the CSRF cookie during login/signup: an SPA that cached the value (or a script
- * that read it once) would silently start failing every subsequent mutation. The cookie the
- * client already holds is the one we keep.
+ * The CSRF cookie is never rotated during login/signup: the token the browser already holds is
+ * bound to the new session and returned in the response body, so a panel that cached it keeps
+ * working and a client that lost the cookie can still send the token it was given.
  */
-function keepExistingCsrf(request: Parameters<typeof readCookie>[0], fallback: string): string {
-  return readCookie(request, CSRF_COOKIE) ?? fallback;
+function existingCsrf(request: Parameters<typeof readCookie>[0]): string | undefined {
+  const token = readCookie(request, CSRF_COOKIE);
+  return token && token.length >= 16 ? token : undefined;
 }
 
 export async function registerAuthRoutes(app: FastifyInstance, deps: RouteDeps): Promise<void> {
   const { db, auth, rateLimiter } = deps;
 
-  app.post('/api/v1/auth/signup', async (request, reply) => {
-    checkCsrf(request);
+  app.post('/api/v1/auth/signup', async (request: RequestWithActor, reply) => {
+    checkCsrf(request, request.actor ?? null);
     rateLimiter.check(request.ip, 'signup', 5, 60_000);
     const body = signupSchema.parse(request.body ?? {});
 
@@ -82,17 +83,17 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: RouteDeps):
       userId: session.userId!,
       ip: request.ip,
       userAgent: request.headers['user-agent'] ?? undefined,
+      csrfToken: existingCsrf(request),
     });
-    const csrfToken = keepExistingCsrf(request, created.csrfToken);
-    auth.setCookies(reply, { ...created, csrfToken });
+    auth.setCookies(reply, created);
     return reply.code(201).send({
       tenant: { id: tenant.id, name: tenant.name, slug: tenant.slug },
-      csrfToken,
+      csrfToken: created.csrfToken,
     });
   });
 
-  app.post('/api/v1/auth/login', async (request, reply) => {
-    checkCsrf(request);
+  app.post('/api/v1/auth/login', async (request: RequestWithActor, reply) => {
+    checkCsrf(request, request.actor ?? null);
     rateLimiter.check(request.ip, 'login', 10, 60_000);
     const body = loginSchema.parse(request.body ?? {});
 
@@ -119,17 +120,17 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: RouteDeps):
       userId: matched.user_id,
       ip: request.ip,
       userAgent: request.headers['user-agent'] ?? undefined,
+      csrfToken: existingCsrf(request),
     });
-    const csrfToken = keepExistingCsrf(request, session.csrfToken);
-    auth.setCookies(reply, { ...session, csrfToken });
+    auth.setCookies(reply, session);
     return reply.send({
       user: { id: matched.user_id, email: body.email, role: matched.role, tenantId: matched.tenant_id },
-      csrfToken,
+      csrfToken: session.csrfToken,
     });
   });
 
-  app.post('/api/v1/auth/logout', async (request, reply) => {
-    checkCsrf(request);
+  app.post('/api/v1/auth/logout', async (request: RequestWithActor, reply) => {
+    checkCsrf(request, request.actor ?? null);
     await auth.destroy(readCookie(request, SESSION_COOKIE));
     auth.clearCookies(reply);
     return reply.send({ ok: true });

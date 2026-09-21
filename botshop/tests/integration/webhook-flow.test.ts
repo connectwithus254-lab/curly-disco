@@ -80,7 +80,7 @@ describe('first slice: seller onboarding and customer journey', () => {
     const noCsrf = new TestClient(app);
     const response = await noCsrf.request('PATCH', '/api/v1/shops/00000000-0000-0000-0000-000000000000', { name: 'x' });
     expect(response.status).toBe(403);
-    expect(response.body.error.code).toBe('forbidden');
+    expect(response.body.error.code).toBe('csrf_failed');
   });
 
   it('connects a bot, verifies it, and stores the token encrypted', async () => {

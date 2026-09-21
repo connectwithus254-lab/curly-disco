@@ -77,7 +77,10 @@ export async function migrate(databaseUrl: string, log: (msg: string) => void = 
 export async function resetSchema(databaseUrl: string): Promise<void> {
   const pool = new Pool({ connectionString: databaseUrl, max: 1 });
   try {
+    // Both schemas belong to the application; dropping `app` as well guarantees a true clean
+    // slate, so re-running migrations can never collide with a previous function signature.
     await pool.query('drop schema if exists public cascade');
+    await pool.query('drop schema if exists app cascade');
     await pool.query('create schema public');
     // The role is created by migration 0001, but a reset can run before that migration exists.
     await pool.query(`
