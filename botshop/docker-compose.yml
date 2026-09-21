@@ -1,0 +1,81 @@
+# Production-ish stack: PostgreSQL + BotShop + (optional) Caddy for automatic TLS.
+#
+#   cp .env.example .env && edit it
+#   docker compose up -d --build
+#   docker compose --profile edge up -d      # adds Caddy + TLS on PUBLIC_DOMAIN
+#
+# Notes
+#  - The app connects with TWO roles: DATABASE_ADMIN_URL (owner: migrations, pg-boss) and
+#    DATABASE_URL (botshop_app: all tenant data, RLS enforced). Do not point them at the same role.
+#  - Set APP_DB_PASSWORD so the app role is not left with the development password.
+#  - Telegram requires HTTPS for webhooks: either terminate TLS here with Caddy (edge profile)
+#    or put the app behind an existing reverse proxy / load balancer.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-botshop}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-botshop}']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Not published: only the app needs to reach the database.
+    expose:
+      - '5432'
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      HOST: 0.0.0.0
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL (https://...) in .env}
+      DATABASE_ADMIN_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-botshop}
+      DATABASE_URL: postgres://botshop_app:${APP_DB_PASSWORD}@db:5432/${POSTGRES_DB:-botshop}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set a strong APP_DB_PASSWORD in .env}
+      ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:?set ENCRYPTION_KEYS in .env}
+      ENCRYPTION_ACTIVE_KEY_ID: ${ENCRYPTION_ACTIVE_KEY_ID:-k1}
+      TELEGRAM_MODE: ${TELEGRAM_MODE:-live}
+      TELEGRAM_POLLING: ${TELEGRAM_POLLING:-false}
+      TELEGRAM_WEBHOOK_ENABLED: 'true'
+      SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-336}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      RUN_MIGRATIONS: 'true'
+      SEED_ON_BOOT: ${SEED_ON_BOOT:-false}
+      SEED_OWNER_EMAIL: ${SEED_OWNER_EMAIL:-}
+      SEED_OWNER_PASSWORD: ${SEED_OWNER_PASSWORD:-}
+    ports:
+      - '${APP_PORT:-3000}:3000'
+
+  # Optional edge: automatic HTTPS certificates for PUBLIC_DOMAIN.
+  # Enable with: docker compose --profile edge up -d
+  caddy:
+    image: caddy:2-alpine
+    profiles: ['edge']
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:

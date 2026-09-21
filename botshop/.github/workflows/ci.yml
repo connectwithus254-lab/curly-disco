@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: botshop/package-lock.json
+
+      - name: Install dependencies
+        working-directory: botshop
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: botshop
+        run: npm run typecheck
+
+      # Integration tests boot their own embedded PostgreSQL, so this job needs no services.
+      - name: Unit + integration tests
+        working-directory: botshop
+        run: npm test
+        env:
+          NODE_ENV: test
+          LOG_LEVEL: warn
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        working-directory: botshop
+        run: docker build -t botshop:ci .

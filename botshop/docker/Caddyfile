@@ -1,0 +1,27 @@
+# Reverse proxy with automatic TLS (used by the `edge` profile in docker-compose.yml).
+# Telegram will only deliver webhooks over HTTPS.
+{$PUBLIC_DOMAIN} {
+	encode zstd gzip
+
+	# Security headers are also set by the app; Caddy adds HSTS and a sane TLS baseline.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	reverse_proxy app:3000 {
+		# Preserve client IPs for rate limiting and audit logs.
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 20mb
+			roll_keep 5
+		}
+		format json
+	}
+}

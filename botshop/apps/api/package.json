@@ -1,0 +1,18 @@
+{
+  "name": "@botshop/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/main.ts",
+  "dependencies": {
+    "@botshop/core": "*",
+    "@botshop/db": "*",
+    "@botshop/shared": "*",
+    "@botshop/telegram": "*",
+    "@fastify/cookie": "^11.0.2",
+    "fastify": "^5.2.1",
+    "grammy": "^1.46.0",
+    "pg-boss": "^12.33.3",
+    "zod": "^3.24.1"
+  }
+}

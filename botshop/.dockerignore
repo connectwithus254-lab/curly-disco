@@ -1,0 +1,11 @@
+node_modules
+.cache
+.git
+.gitignore
+docs
+tests
+coverage
+*.log
+.env
+.env.*
+!.env.example

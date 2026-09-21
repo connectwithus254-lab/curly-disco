@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BotShop — seller panel</title>
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">BS</span>
+        <div>
+          <strong>BotShop</strong>
+          <small id="meta-line">seller panel</small>
+        </div>
+      </div>
+      <nav class="topnav">
+        <button data-view="dashboard" class="nav-btn">Dashboard</button>
+        <button data-view="wizard" class="nav-btn">Setup wizard</button>
+        <button data-view="preview" class="nav-btn">Preview</button>
+        <button data-view="customers" class="nav-btn">Customers</button>
+        <button id="logout" class="nav-btn ghost" hidden>Sign out</button>
+      </nav>
+    </header>
+
+    <main>
+      <!-- ------------------------------------------------------------- login -->
+      <section id="view-login" class="view active">
+        <div class="card auth-card">
+          <h1>Sign in</h1>
+          <p class="muted">Demo workspace: <code>owner@kesi.test</code> / <code>demo-password-123</code></p>
+          <form id="login-form">
+            <label>Email<input name="email" type="email" required autocomplete="username" /></label>
+            <label>Password<input name="password" type="password" required autocomplete="current-password" /></label>
+            <label>Workspace slug <span class="muted">(optional)</span><input name="workspace" placeholder="kesi-crafts" /></label>
+            <button type="submit" class="primary">Sign in</button>
+          </form>
+          <hr />
+          <h2>Create a workspace</h2>
+          <form id="signup-form">
+            <label>Business name<input name="workspaceName" required placeholder="Kesi Crafts" /></label>
+            <label>Your name<input name="fullName" required placeholder="Amina" /></label>
+            <label>Email<input name="email" type="email" required /></label>
+            <label>Password <span class="muted">(min 10 chars)</span><input name="password" type="password" minlength="10" required /></label>
+            <button type="submit">Create workspace</button>
+          </form>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------------------- dashboard -->
+      <section id="view-dashboard" class="view">
+        <div class="grid">
+          <div class="card">
+            <h2>Your shop</h2>
+            <div id="shop-summary" class="stack"></div>
+          </div>
+          <div class="card">
+            <h2>Bot</h2>
+            <div id="bot-summary" class="stack"></div>
+            <div class="row">
+              <button id="bot-check">Run health check</button>
+            </div>
+          </div>
+          <div class="card span2">
+            <h2>Activity</h2>
+            <div id="metrics" class="metrics"></div>
+            <div class="two-col">
+              <div>
+                <h3>Recent inbound updates</h3>
+                <div id="recent-updates" class="table"></div>
+              </div>
+              <div>
+                <h3>Recent audit entries</h3>
+                <div id="recent-audit" class="table"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ------------------------------------------------------------ wizard -->
+      <section id="view-wizard" class="view">
+        <div class="card">
+          <h1>Setup wizard</h1>
+          <div class="steps" id="wizard-steps"></div>
+
+          <form id="wizard-form" class="stack">
+            <fieldset data-step="1">
+              <legend>1 · Business identity</legend>
+              <label>Business name<input name="name" required /></label>
+              <label>Category<input name="category" placeholder="Handmade & Accessories" /></label>
+              <div class="row">
+                <label>Currency (ISO)<input name="currency" maxlength="3" placeholder="USD" /></label>
+                <label>Country code<input name="country" maxlength="2" placeholder="KE" /></label>
+                <label>Timezone<input name="timezone" placeholder="Africa/Nairobi" /></label>
+              </div>
+              <div class="row">
+                <label>Contact email<input name="contactEmail" type="email" /></label>
+                <label>Contact phone<input name="contactPhone" /></label>
+              </div>
+              <label>Short description<textarea name="description" rows="3"></textarea></label>
+            </fieldset>
+
+            <fieldset data-step="2" hidden>
+              <legend>2 · Languages</legend>
+              <p class="muted">Customers pick a language on first contact, and can change it any time from the menu.</p>
+              <label>Default language
+                <select name="defaultLocale">
+                  <option value="en">English</option>
+                  <option value="sw">Kiswahili</option>
+                  <option value="ru">Русский</option>
+                </select>
+              </label>
+              <label class="check"><input type="checkbox" name="locale_en" checked /> English</label>
+              <label class="check"><input type="checkbox" name="locale_sw" checked /> Kiswahili</label>
+              <label class="check"><input type="checkbox" name="locale_ru" /> Русский</label>
+            </fieldset>
+
+            <fieldset data-step="3" hidden>
+              <legend>3 · Policies &amp; support</legend>
+              <label>Rules shown in the bot<textarea name="rulesMd" rows="3" placeholder="Shipping, returns, order handling…"></textarea></label>
+              <label>Refund policy<textarea name="refundPolicyMd" rows="2"></textarea></label>
+              <label>Delivery policy<textarea name="deliveryPolicyMd" rows="2"></textarea></label>
+              <label>Support hours<input name="supportHours" placeholder="Mon–Sat, 09:00–18:00" /></label>
+              <label>Staff chat id <span class="muted">(forward customer messages here; optional)</span><input name="supportChatId" placeholder="-1001234567890" /></label>
+            </fieldset>
+
+            <fieldset data-step="4" hidden>
+              <legend>4 · Connect your Telegram bot</legend>
+              <ol class="muted compact">
+                <li>Open <a href="https://t.me/BotFather" target="_blank" rel="noreferrer">@BotFather</a>, send <code>/newbot</code>, copy the token.</li>
+                <li>Paste it below. We call <code>getMe</code> to verify it, encrypt it with AES-256-GCM, then register the webhook.</li>
+              </ol>
+              <label>Bot token<input name="botToken" placeholder="123456789:AA…" autocomplete="off" /></label>
+              <label>Mode
+                <select name="botMode">
+                  <option value="webhook">Webhook (needs a public HTTPS URL)</option>
+                  <option value="polling">Polling (works from a laptop, no domain)</option>
+                </select>
+              </label>
+              <p class="muted" id="demo-token-hint"></p>
+              <button type="button" id="connect-bot">Connect bot</button>
+              <div id="bot-result" class="stack"></div>
+            </fieldset>
+
+            <fieldset data-step="5" hidden>
+              <legend>5 · Preview</legend>
+              <p class="muted">Screens below are rendered by exactly the same code the live bot uses.</p>
+              <button type="button" class="link" data-preview="main">Main menu</button>
+              <button type="button" class="link" data-preview="language">Language picker</button>
+              <button type="button" class="link" data-preview="rules">Rules</button>
+              <button type="button" class="link" data-preview="support">Support</button>
+              <button type="button" class="link" data-preview="help">Help</button>
+              <pre id="wizard-preview" class="phone"></pre>
+            </fieldset>
+
+            <fieldset data-step="6" hidden>
+              <legend>6 · Launch</legend>
+              <p class="muted">Launching enables the bot for customers. You can change everything later.</p>
+              <div id="launch-result" class="stack"></div>
+            </fieldset>
+
+            <div class="row wizard-actions">
+              <button type="button" id="wizard-back">Back</button>
+              <button type="submit" class="primary" id="wizard-next">Save &amp; continue</button>
+              <button type="button" id="wizard-launch" class="primary" hidden>Launch shop</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- ----------------------------------------------------------- preview -->
+      <section id="view-preview" class="view">
+        <div class="grid">
+          <div class="card">
+            <h2>Bot screen</h2>
+            <div class="row wrap">
+              <button data-preview="main">Main menu</button>
+              <button data-preview="language">Language</button>
+              <button data-preview="rules">Rules</button>
+              <button data-preview="support">Support</button>
+              <button data-preview="help">Help</button>
+            </div>
+            <div id="phone" class="phone-box">
+              <div class="phone-head">Telegram</div>
+              <div id="phone-text" class="phone-text">Choose a screen…</div>
+              <div id="phone-buttons" class="phone-buttons"></div>
+            </div>
+          </div>
+          <div class="card">
+            <h2>Simulate an update</h2>
+            <p class="muted">Dry run: shows what the bot would do. Nothing is sent to Telegram.</p>
+            <div class="row">
+              <input id="sim-text" placeholder="/start" />
+              <button id="sim-send">Simulate</button>
+            </div>
+            <div class="row wrap">
+              <button class="link" data-sim="/start">/start</button>
+              <button class="link" data-sim="/rules">/rules</button>
+              <button class="link" data-sim="/help">/help</button>
+              <button class="link" data-sim="/language">/language</button>
+              <button class="link" data-sim="m:home">callback m:home</button>
+              <button class="link" data-sim="l:set:sw">callback l:set:sw</button>
+            </div>
+            <pre id="sim-out" class="code"></pre>
+            <h3>Offline transport log</h3>
+            <p class="muted">In demo mode the bot runs against an in-process Telegram transport, so this is what it “sent”.</p>
+            <pre id="outbox" class="code"></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- --------------------------------------------------------- customers -->
+      <section id="view-customers" class="view">
+        <div class="card">
+          <h2>Customers</h2>
+          <div id="customers-table" class="table"></div>
+        </div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast" hidden></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
