@@ -178,6 +178,8 @@ export class AuthService {
 
 export interface RequestWithActor extends FastifyRequest {
   actor?: SessionActor;
+  /** How this request authenticated: an httpOnly cookie, or a bearer token (embedded contexts). */
+  authVia?: 'cookie' | 'bearer';
 }
 
 export function readCookie(request: FastifyRequest, name: string): string | undefined {
@@ -226,9 +228,15 @@ function publicBaseHost(): string | null {
  *
  * Everything else is rejected — including cross-site form posts, which can do none of the above.
  */
-export function checkCsrf(request: FastifyRequest, actor?: SessionActor | null): void {
+export function checkCsrf(request: FastifyRequest, actor?: SessionActor | null, via?: 'cookie' | 'bearer'): void {
   const method = request.method.toUpperCase();
   if (['GET', 'HEAD', 'OPTIONS'].includes(method)) return;
+
+  // Bearer-authenticated requests need no CSRF defence: a browser never attaches an Authorization
+  // header on its own, so a cross-site page cannot forge one (it would need the token, which it
+  // cannot read). Cookie-authenticated requests keep the full checks below.
+  const transport = via ?? (request as RequestWithActor).authVia;
+  if (transport === 'bearer' && actor) return;
 
   const cookieToken = readCookie(request, CSRF_COOKIE);
   const rawHeader = request.headers[CSRF_HEADER];

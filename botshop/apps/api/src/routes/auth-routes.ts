@@ -44,7 +44,7 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: RouteDeps):
   const { db, auth, rateLimiter } = deps;
 
   app.post('/api/v1/auth/signup', async (request: RequestWithActor, reply) => {
-    checkCsrf(request, request.actor ?? null);
+    checkCsrf(request, request.actor ?? null, request.authVia);
     rateLimiter.check(request.ip, 'signup', 5, 60_000);
     const body = signupSchema.parse(request.body ?? {});
 
@@ -89,11 +89,14 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: RouteDeps):
     return reply.code(201).send({
       tenant: { id: tenant.id, name: tenant.name, slug: tenant.slug },
       csrfToken: created.csrfToken,
+      // Fallback for browsers that refuse to store cookies (embedded previews, third-party
+      // cookie blocking). Same value the httpOnly cookie carries; sent only to our own JS.
+      sessionToken: created.token,
     });
   });
 
   app.post('/api/v1/auth/login', async (request: RequestWithActor, reply) => {
-    checkCsrf(request, request.actor ?? null);
+    checkCsrf(request, request.actor ?? null, request.authVia);
     rateLimiter.check(request.ip, 'login', 10, 60_000);
     const body = loginSchema.parse(request.body ?? {});
 
@@ -126,11 +129,20 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: RouteDeps):
     return reply.send({
       user: { id: matched.user_id, email: body.email, role: matched.role, tenantId: matched.tenant_id },
       csrfToken: session.csrfToken,
+      sessionToken: session.token,
     });
   });
 
   app.post('/api/v1/auth/logout', async (request: RequestWithActor, reply) => {
-    checkCsrf(request, request.actor ?? null);
+    checkCsrf(request, request.actor ?? null, request.authVia);
+    // Revoke whichever session this request authenticated with (bearer token first, then cookie).
+    if (request.actor) {
+      await db.withTenant(
+        request.actor.tenantId,
+        (tx) => tx.execute('delete from sessions where id = $1', [request.actor!.sessionId]),
+        { actorRole: request.actor.role },
+      );
+    }
     await auth.destroy(readCookie(request, SESSION_COOKIE));
     auth.clearCookies(reply);
     return reply.send({ ok: true });

@@ -103,7 +103,8 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   app.addHook('preHandler', async (request) => {
     if (!request.url.startsWith('/api/')) return;
     if (['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase())) return;
-    checkCsrf(request, (request as RequestWithActor).actor ?? null);
+    const scoped = request as RequestWithActor;
+    checkCsrf(request, scoped.actor ?? null, scoped.authVia);
   });
 
   await registerSystemRoutes(app, options);

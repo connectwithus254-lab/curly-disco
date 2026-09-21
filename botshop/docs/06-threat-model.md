@@ -106,3 +106,21 @@ commits.
 * Provide merchants with a data-processing addendum; the platform processes customer PII on
   their behalf. Offer export & erasure tooling.
 * Keep transaction records (payments, ledgers) immutable for the statutory period.
+
+
+---
+
+## Addendum — session transport and CSRF (implemented in the first slice)
+
+Two session transports are supported, because one of them is impossible in some browser contexts:
+
+| Transport | When it is used | CSRF defence |
+|---|---|---|
+| `bs_session` cookie (httpOnly, SameSite=Lax) | normal deployment: the panel is opened as the top-level page of our own origin | required: session-bound token, double-submit pair, or same-site Origin (see `checkCsrf`) |
+| `Authorization: Bearer <session token>` | embedded/third-party contexts where the browser refuses to store cookies (preview iframes, strict privacy modes) | **not applicable**: a browser never attaches an Authorization header by itself, and a cross-site page cannot read our response (no CORS allowance) nor the localStorage token, so it cannot forge one |
+
+Trade-off, stated explicitly: a bearer token lives in `localStorage` for the fallback path, so a
+successful XSS in the panel would expose it (an httpOnly cookie would not). That risk is held down
+by `script-src 'self'` (no inline or third-party scripts, set globally), rendering every API value
+through `textContent`, and never injecting HTML. The cookie path remains the default wherever the
+browser allows it, so a real deployment gets the stronger transport.

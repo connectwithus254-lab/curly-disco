@@ -3,7 +3,50 @@
    everything rendered from API data goes through textContent, never innerHTML. */
 'use strict';
 
-const state = { me: null, shops: [], bots: [], step: 1, dashboard: null };
+const state = { me: null, shops: [], bots: [], step: 1, dashboard: null, sessionToken: null, sessionMode: null };
+
+/* Session transport.
+   Cookies are the preferred (httpOnly) transport, but browsers refuse to store them when the
+   panel runs inside a cross-site frame — exactly what happens in an embedded preview — so the
+   API also returns a session token we can send as `Authorization: Bearer`. Whichever works is
+   used; the active one is shown in the header so this is never a mystery again. */
+const TOKEN_KEY = 'bs_session_token';
+
+function loadToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function saveToken(token) {
+  state.sessionToken = token || null;
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* storage unavailable (private mode) — the in-memory copy still works for this page */
+  }
+}
+
+function setSessionMode(mode) {
+  state.sessionMode = mode;
+  const el = document.getElementById('meta-line');
+  if (!el) return;
+  const label = { cookie: 'cookie', token: 'token', 'cookie+token': 'cookie + token', none: 'not signed in' }[mode] || mode;
+  el.textContent = `${el.dataset.meta || 'seller panel'} · session: ${label}`;
+}
+
+/** Does the browser actually keep and return our session cookie? (Probed without any bearer header.) */
+async function cookieSessionWorks() {
+  try {
+    const res = await fetch('/api/v1/auth/me', { credentials: 'same-origin' });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -20,6 +63,8 @@ async function api(method, path, body, retried) {
   if (body !== undefined) headers['content-type'] = 'application/json';
   const csrf = cookie('bs_csrf');
   if (csrf) headers['x-csrf-token'] = csrf;
+  const token = state.sessionToken || loadToken();
+  if (token) headers['authorization'] = `Bearer ${token}`;
   const res = await fetch(path, {
     method,
     headers,
@@ -120,18 +165,26 @@ function badge(text, kind) {
 /* --------------------------------------------------------------------- auth */
 
 async function boot() {
+  state.sessionToken = loadToken();
   try {
-    const meta = await fetch('/api/v1/meta').then((r) => r.json());
-    document.getElementById('meta-line').textContent =
-      `seller panel · ${meta.milestone} · telegram: ${meta.telegramMode}`;
+    const meta = await fetch('/api/v1/meta', { credentials: 'same-origin' }).then((r) => r.json());
+    const el = document.getElementById('meta-line');
+    el.dataset.meta = `seller panel · ${meta.milestone} · telegram: ${meta.telegramMode}`;
+    el.textContent = el.dataset.meta;
   } catch {
     /* meta is cosmetic */
   }
   try {
     const me = await api('GET', '/api/v1/auth/me');
     state.me = me;
+    setSessionMode((await cookieSessionWorks()) ? 'cookie' : state.sessionToken ? 'token' : 'cookie');
     await afterLogin();
   } catch {
+    if (state.sessionToken) {
+      // The stored token is stale (server restarted with a fresh database, or it expired).
+      saveToken(null);
+    }
+    setSessionMode(cookie('bs_session') ? 'cookie' : 'none');
     show('login');
   }
 }
@@ -157,12 +210,12 @@ document.getElementById('login-form').addEventListener('submit', async (event) =
   event.preventDefault();
   const form = new FormData(event.target);
   try {
-    await api('POST', '/api/v1/auth/login', {
+    const result = await api('POST', '/api/v1/auth/login', {
       email: form.get('email'),
       password: form.get('password'),
       ...(form.get('workspace') ? { workspace: form.get('workspace') } : {}),
     });
-    state.me = await api('GET', '/api/v1/auth/me');
+    await adoptSession(result);
     toast('Signed in', 'ok');
     await afterLogin();
   } catch (error) {
@@ -174,13 +227,13 @@ document.getElementById('signup-form').addEventListener('submit', async (event) 
   event.preventDefault();
   const form = new FormData(event.target);
   try {
-    await api('POST', '/api/v1/auth/signup', {
+    const result = await api('POST', '/api/v1/auth/signup', {
       workspaceName: form.get('workspaceName'),
       fullName: form.get('fullName'),
       email: form.get('email'),
       password: form.get('password'),
     });
-    state.me = await api('GET', '/api/v1/auth/me');
+    await adoptSession(result);
     toast('Workspace created', 'ok');
     await afterLogin();
   } catch (error) {
@@ -189,9 +242,36 @@ document.getElementById('signup-form').addEventListener('submit', async (event) 
 });
 
 document.getElementById('logout').addEventListener('click', async () => {
-  await api('POST', '/api/v1/auth/logout');
+  try {
+    await api('POST', '/api/v1/auth/logout');
+  } catch {
+    /* the session may already be gone */
+  }
+  saveToken(null);
   location.reload();
 });
+
+/**
+ * After login/signup the server hands back a session token. If the browser also accepted the
+ * cookie we can use it (more secure, httpOnly); if it did not — which is normal inside an
+ * embedded preview — we keep the token and send it as a bearer header instead.
+ */
+async function adoptSession(result) {
+  const token = result && result.sessionToken;
+  if (!token) {
+    setSessionMode('cookie');
+    return;
+  }
+  // Keep the token in memory before probing, so a browser that dropped the cookie is not left
+  // unauthenticated for even one request.
+  state.sessionToken = token;
+  const cookiesWork = await cookieSessionWorks();
+  saveToken(cookiesWork ? null : token);
+  setSessionMode(cookiesWork ? 'cookie' : 'token');
+  if (!cookiesWork) {
+    toast('This browser blocks cookies in embedded frames — using a token session instead.', 'ok');
+  }
+}
 
 document.querySelectorAll('.nav-btn[data-view]').forEach((btn) =>
   btn.addEventListener('click', () => show(btn.dataset.view)),

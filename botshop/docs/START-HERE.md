@@ -281,6 +281,12 @@ Differences from a real deployment: `TELEGRAM_MODE=fake`, so no messages leave t
 safe for exploring: connect a bot with any token shaped `123456789:AA…`, click through the wizard,
 simulate updates, watch the dashboard counters move. Nothing here survives a restart.
 
+> **Sessions in embedded previews.** A browser only stores our session cookie when the panel is
+> opened as the top-level page of our own origin. Inside an embedded frame (like the workspace
+> preview in this chat) the cookie is blocked, so the panel uses a **token session** instead —
+> notice `session: token` in the header. On a real deployment you will see `session: cookie`, which
+> is the more secure transport (the token is never readable by scripts).
+
 > **A token pasted in demo mode is not a real connection.** Telegram is never contacted, so your
 > bot will not answer real messages from here. To make a BotFather token actually work, run the
 > platform with `TELEGRAM_MODE=live` (Path A step A6 or Path B step B4).
@@ -372,6 +378,7 @@ telegram plumbing end to end. Payments are the next slice — they need your dec
 | Panel won't load at all | stack not running / wrong URL | `docker compose ps`, then `docker compose logs -f app` |
 | `503` on `/healthz`, logs say `db: down` | wrong `POSTGRES_PASSWORD` vs `DATABASE_*_URL`, or DB still starting | check `.env` consistency, then `docker compose restart app` |
 | Login says *Incorrect email or password* | account created in a different workspace, or wrong password | use the workspace slug field; re-create the workspace if needed |
+| **“Authentication required”** right after signing in (login seems to succeed, then everything says it) | your browser refused to store the session cookie, which happens when the panel runs inside a frame from a different site (embedded preview) — Safari/Firefox/Chrome block third-party cookies | nothing to do: the panel now automatically falls back to a token session, and the header shows **session: token** instead of **session: cookie**. If you still see it, reload the page once so the new panel code loads |
 | Panel says **“Security check failed”** (previously “CSRF check failed”) | the page's security token is stale — usually a panel left open across a restart, or a browser/privacy setting that drops one of the cookies in an embedded preview | reload the page. The panel now refreshes the token by itself and retries once; if it persists, check `docker compose logs app` for the `CSRF check failed` line, which prints what was missing |
 | **“Cannot read properties of undefined (reading 'id')”** | an action that needs a saved shop was clicked before step 1 was saved (older panel versions crashed instead of explaining) | reload the panel; it now says *“No shop yet — fill in step 1 and press Save & continue”* instead |
 | **“This shop already has a bot connected”** | a bot is already attached to that shop | wizard step 4 → **Disconnect**, then connect the new token (you no longer have to delete anything) |

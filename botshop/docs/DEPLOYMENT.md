@@ -218,3 +218,7 @@ webhooks will consume in M6.
 - [ ] Backups scheduled **and** restore tested.
 - [ ] `SEED_ON_BOOT=false` and seeded demo credentials rotated/removed.
 - [ ] Checkout/payment milestone (M3) adds gateway IPN verification before this goes live for sales.
+- [ ] Panel opened at your own domain shows **session: cookie** in the header. If it shows
+      **session: token**, the browser is blocking our cookie (typically because the panel is
+      embedded in another site) — prefer opening it directly, since cookies are the stronger
+      transport.
