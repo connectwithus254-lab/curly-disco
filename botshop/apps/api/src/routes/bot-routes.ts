@@ -14,6 +14,7 @@ import * as repo from '@botshop/db/repos';
 import { authorize, requireActor, type RequestWithActor } from '../auth.ts';
 import { resolveTransport } from '../telegram-transport.ts';
 import type { RouteDeps } from './types.ts';
+import { pathId } from './params.ts';
 
 const TELEGRAM_TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
 
@@ -179,7 +180,7 @@ export async function registerBotRoutes(app: FastifyInstance, deps: RouteDeps): 
   app.post('/api/v1/bots/:botId/check', async (request: RequestWithActor, reply) => {
     const actor = requireActor(request);
     authorize(actor, 'write');
-    const { botId } = request.params as { botId: string };
+    const botId = pathId(request, 'botId');
 
     const bot = await db.withTenant(actor.tenantId, (tx) => repo.getBot(tx, botId), { actorRole: actor.role });
     if (!bot) throw ERRORS.notFound('Bot not found');
@@ -218,7 +219,7 @@ export async function registerBotRoutes(app: FastifyInstance, deps: RouteDeps): 
   app.post('/api/v1/bots/:botId/test-message', async (request: RequestWithActor, reply) => {
     const actor = requireActor(request);
     authorize(actor, 'write');
-    const { botId } = request.params as { botId: string };
+    const botId = pathId(request, 'botId');
     const body = z.object({ chatId: z.number().int().optional(), text: z.string().max(500).optional() }).parse(request.body ?? {});
 
     const bot = await db.withTenant(actor.tenantId, (tx) => repo.getBot(tx, botId), { actorRole: actor.role });
@@ -259,7 +260,7 @@ export async function registerBotRoutes(app: FastifyInstance, deps: RouteDeps): 
   app.delete('/api/v1/bots/:botId', async (request: RequestWithActor, reply) => {
     const actor = requireActor(request);
     authorize(actor, 'write');
-    const { botId } = request.params as { botId: string };
+    const botId = pathId(request, 'botId');
 
     const bot = await db.withTenant(actor.tenantId, (tx) => repo.getBot(tx, botId), { actorRole: actor.role });
     if (!bot) throw ERRORS.notFound('Bot not found');

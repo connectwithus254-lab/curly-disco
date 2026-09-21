@@ -95,6 +95,20 @@ describe('bot lifecycle', () => {
     expect(env.keyRing.decrypt(row!.token_ciphertext)).toBe(TOKEN_B);
   });
 
+  it('answers a malformed id with 404 instead of crashing on the database', async () => {
+    // A stale bookmark or a copy-pasted URL used to reach Postgres as a non-uuid and surface as
+    // "Internal server error" (500). A link problem must never look like a platform failure.
+    const check = await client.post('/api/v1/bots/undefined/check', {});
+    expect(check.status).toBe(404);
+
+    const remove = await client.del('/api/v1/bots/not-a-uuid');
+    expect(remove.status).toBe(404);
+
+    const shop = await client.patch('/api/v1/shops/undefined', { name: 'Anything' });
+    expect(shop.status).toBe(404);
+    expect(shop.body.error.code).toBe('not_found');
+  });
+
   it('audits connect and disconnect', async () => {
     const actions = (await env.adminDb.raw<{ action: string }>(
       "select action from audit_logs where action like 'bot.%' order by created_at",

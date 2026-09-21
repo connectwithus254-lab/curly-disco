@@ -11,7 +11,15 @@ interface Bucket {
   hits: number[];
 }
 
-export function createRateLimiter(): RateLimiter & { prune: () => void } {
+export interface RateLimiterOptions {
+  /**
+   * Turn the limiter off entirely. Used by integration tests that create many workspaces in a
+   * few seconds; production and development always run with it enabled.
+   */
+  disabled?: boolean;
+}
+
+export function createRateLimiter(options: RateLimiterOptions = {}): RateLimiter & { prune: () => void } {
   const buckets = new Map<string, Bucket>();
 
   const prune = (): void => {
@@ -24,6 +32,7 @@ export function createRateLimiter(): RateLimiter & { prune: () => void } {
 
   return {
     check(ip, action, limit, windowMs) {
+      if (options.disabled) return;
       const key = `${action}:${ip ?? 'unknown'}`;
       const now = Date.now();
       const bucket = buckets.get(key) ?? { hits: [] };

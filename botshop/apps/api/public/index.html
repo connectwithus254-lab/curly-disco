@@ -86,7 +86,9 @@
           <h1>Setup wizard</h1>
           <div class="steps" id="wizard-steps"></div>
 
-          <form id="wizard-form" class="stack">
+          <div id="wizard-error" class="alert" hidden></div>
+
+          <form id="wizard-form" class="stack" novalidate>
             <fieldset data-step="1">
               <legend>1 · Business identity</legend>
               <label>Business name<input name="name" required /></label>
@@ -142,6 +144,7 @@
               </label>
               <p class="muted" id="demo-token-hint"></p>
               <button type="button" id="connect-bot">Connect bot</button>
+              <p class="muted" id="bot-step-hint"></p>
               <div id="bot-result" class="stack"></div>
             </fieldset>
 

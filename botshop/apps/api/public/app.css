@@ -132,6 +132,16 @@ pre.phone, pre.code {
 .toast.error { border-color: var(--danger); color: #ffd7d7; }
 .toast.ok { border-color: var(--accent); }
 
+.alert {
+  border: 1px solid var(--danger); background: rgba(239, 107, 107, .12); color: #ffdcdc;
+  border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; font-size: 13.5px;
+  white-space: pre-wrap;
+}
+.alert ul { margin: 8px 0 0; padding-left: 18px; }
+.alert li { margin-bottom: 3px; }
+input.invalid, select.invalid, textarea.invalid { border-color: var(--danger); background: rgba(239, 107, 107, .06); }
+.field-hint { color: var(--danger); font-size: 12px; }
+
 .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; border: 1px solid var(--border); color: var(--muted); }
 .badge.ok { color: var(--accent); border-color: var(--accent-2); }
 .badge.warn { color: #ffcf7a; border-color: #6b5526; }

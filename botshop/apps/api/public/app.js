@@ -85,10 +85,18 @@ async function api(method, path, body, retried) {
       }
       return api(method, path, body, true);
     }
-    const problems = error.details && error.details.problems;
-    const message = problems ? `${error.message}: ${problems.join('; ')}` : error.message || res.statusText;
+    const details = error.details || {};
+    const issues = Array.isArray(details.issues) ? details.issues : [];
+    const problems = Array.isArray(details.problems) ? details.problems : [];
+    const parts = [
+      ...issues.map((i) => (i.path ? `${i.path}: ${i.message}` : i.message)),
+      ...problems,
+    ];
+    const message = parts.length > 0 ? `${error.message} — ${parts.join('; ')}` : error.message || res.statusText;
     const failure = new Error(message);
     failure.code = error.code;
+    failure.issues = issues;
+    failure.problems = problems;
     throw failure;
   }
   return data;
@@ -155,6 +163,35 @@ function table(container, columns, rows) {
   container.append(t);
 }
 
+function showWizardError(error) {
+  const banner = document.getElementById('wizard-error');
+  document.querySelectorAll('#wizard-form .invalid').forEach((el) => el.classList.remove('invalid'));
+  if (!error) {
+    banner.hidden = true;
+    banner.textContent = '';
+    return;
+  }
+  banner.textContent = '';
+  const title = document.createElement('strong');
+  title.textContent = 'Could not save: ';
+  banner.append(title, document.createTextNode(error.message || String(error)));
+
+  const issues = error.issues || [];
+  if (issues.length > 0) {
+    const list = document.createElement('ul');
+    issues.forEach((issue) => {
+      const li = document.createElement('li');
+      li.textContent = issue.path ? `${issue.path}: ${issue.message}` : issue.message;
+      list.append(li);
+      const field = issue.path && document.querySelector(`#wizard-form [name="${issue.path}"]`);
+      if (field) field.classList.add('invalid');
+    });
+    banner.append(list);
+  }
+  banner.hidden = false;
+  banner.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
 function badge(text, kind) {
   const s = document.createElement('span');
   s.className = 'badge ' + (kind || '');
@@ -195,14 +232,16 @@ async function afterLogin() {
   state.shops = shops;
   const { bots } = await api('GET', '/api/v1/bots');
   state.bots = bots;
-  state.step = shops.length > 0 ? Math.min(shops[0].onboardingStep || 1, 6) : 1;
-  if (shops.length === 0) {
+  const shop = shops[0];
+  state.step = shop ? Math.min(shop.onboardingStep || 1, 6) : 1;
+  renderShopSummary();
+  renderBotSummary();
+  if (!shop || !shop.onboardingCompletedAt) {
+    // Still being set up (or not created yet): land in the wizard, at the step they left off.
     show('wizard');
     renderWizard();
     return;
   }
-  renderShopSummary();
-  renderBotSummary();
   show('dashboard');
 }
 
@@ -274,7 +313,10 @@ async function adoptSession(result) {
 }
 
 document.querySelectorAll('.nav-btn[data-view]').forEach((btn) =>
-  btn.addEventListener('click', () => show(btn.dataset.view)),
+  btn.addEventListener('click', () => {
+    if (btn.dataset.view === 'wizard') renderWizard();
+    show(btn.dataset.view);
+  }),
 );
 
 /* ---------------------------------------------------------------- dashboard */
@@ -434,6 +476,10 @@ function renderWizard() {
   }
   if (state.step === 4) {
     document.getElementById('demo-token-hint').textContent = demoTokenHint();
+    const hint = document.getElementById('bot-step-hint');
+    hint.textContent = state.shops.length === 0
+      ? 'No shop saved yet — press “Save & continue” on step 1 first, or just click Connect bot and we will save it for you.'
+      : '';
     renderBotStep();
   }
 }
@@ -519,21 +565,31 @@ document.getElementById('wizard-back').addEventListener('click', () => {
   renderWizard();
 });
 
-document.getElementById('wizard-form').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const form = event.target;
+/** Saves the current wizard step. Returns true on success; shows exactly what failed otherwise. */
+async function saveStep(step) {
+  const form = document.getElementById('wizard-form');
+  const values = Object.fromEntries(new FormData(form).entries());
+  const text = (key) => (values[key] || '').toString().trim();
+  // Empty inputs must be OMITTED (not sent as null/''), so the API keeps whatever is already stored.
+  const orUndefined = (value) => (value ? value : undefined);
+
   try {
-    if (state.step === 1) {
+    if (step === 1) {
       const payload = {
-        name: form.name.value,
-        description: form.description.value || null,
-        category: form.category.value || null,
-        country: form.country.value ? form.country.value.toUpperCase() : null,
-        currency: form.currency.value ? form.currency.value.toUpperCase() : undefined,
-        timezone: form.timezone.value || undefined,
-        contactEmail: form.contactEmail.value || null,
-        contactPhone: form.contactPhone.value || null,
+        name: text('name'),
+        description: orUndefined(text('description')),
+        category: orUndefined(text('category')),
+        country: orUndefined(text('country').toUpperCase()),
+        currency: orUndefined(text('currency').toUpperCase()),
+        timezone: orUndefined(text('timezone')),
+        contactEmail: orUndefined(text('contactEmail')),
+        contactPhone: orUndefined(text('contactPhone')),
+        onboardingStep: 2,
       };
+      if (!payload.name) {
+        showWizardError({ message: 'Business name is required — it is what customers see in the bot.' });
+        return false;
+      }
       if (state.shops.length === 0) {
         const created = await api('POST', '/api/v1/shops', {
           name: payload.name,
@@ -546,41 +602,81 @@ document.getElementById('wizard-form').addEventListener('submit', async (event) 
         });
         state.shops = [created.shop];
       }
-      await api('PATCH', `/api/v1/shops/${state.shops[0].id}`, payload);
-    } else if (state.step === 2) {
+      const patched = await api('PATCH', `/api/v1/shops/${state.shops[0].id}`, payload);
+      state.shops = [patched.shop];
+    } else if (step === 2) {
       const shop = requireShop();
-      if (!shop) return;
-      const supported = ['en', 'sw', 'ru'].filter((code) => form['locale_' + code].checked);
-      await api('PATCH', `/api/v1/shops/${shop.id}`, {
-        defaultLocale: form.defaultLocale.value,
+      if (!shop) return false;
+      const supported = ['en', 'sw', 'ru'].filter((code) => form['locale_' + code] && form['locale_' + code].checked);
+      const patched = await api('PATCH', `/api/v1/shops/${shop.id}`, {
+        defaultLocale: values.defaultLocale,
         supportedLocales: supported.length > 0 ? supported : ['en'],
+        onboardingStep: 3,
       });
-    } else if (state.step === 3) {
+      state.shops = [patched.shop];
+    } else if (step === 3) {
       const shop = requireShop();
-      if (!shop) return;
-      await api('PATCH', `/api/v1/shops/${shop.id}`, {
-        rulesMd: form.rulesMd.value || null,
-        refundPolicyMd: form.refundPolicyMd.value || null,
-        deliveryPolicyMd: form.deliveryPolicyMd.value || null,
-        supportHours: form.supportHours.value || null,
-        supportChatId: form.supportChatId.value || null,
+      if (!shop) return false;
+      const patched = await api('PATCH', `/api/v1/shops/${shop.id}`, {
+        rulesMd: orUndefined(text('rulesMd')),
+        refundPolicyMd: orUndefined(text('refundPolicyMd')),
+        deliveryPolicyMd: orUndefined(text('deliveryPolicyMd')),
+        supportHours: orUndefined(text('supportHours')),
+        supportChatId: orUndefined(text('supportChatId')),
+        onboardingStep: 4,
       });
+      state.shops = [patched.shop];
     }
     state.shops = (await api('GET', '/api/v1/shops')).shops;
-    state.step = Math.min(6, state.step + 1);
-    renderWizard();
-    toast('Saved', 'ok');
+    showWizardError(null);
+    return true;
   } catch (error) {
+    showWizardError(error);
     toast(error.message, 'error');
+    return false;
   }
-});
+}
 
+document.getElementById('wizard-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (state.step >= 6) return; // the launch button handles step 6
+  const saved = await saveStep(state.step);
+  if (!saved) return;
+  state.step = Math.min(6, state.step + 1);
+  renderWizard();
+  toast('Saved', 'ok');
+});
 document.getElementById('connect-bot').addEventListener('click', async () => {
   const form = document.getElementById('wizard-form');
   const box = document.getElementById('bot-result');
-  const shop = requireShop();
-  if (!shop) return;
   const token = form.botToken.value.trim();
+
+  // Recovery path: the seller may click Connect before step 1 was saved. Rather than sending them
+  // back with an error, save step 1 with whatever is in the form and continue if it succeeds.
+  let shop = state.shops[0];
+  if (!shop) {
+    box.textContent = 'No shop saved yet — saving step 1 first…';
+    const saved = await saveStep(1);
+    if (!saved) {
+      box.textContent = '';
+      return;
+    }
+    shop = state.shops[0];
+    if (!shop) {
+      box.textContent = '';
+      toast('Could not create the shop — check step 1 and try again.', 'error');
+      return;
+    }
+    // saveStep(1) records "step 2" as the furthest reached; put the seller's real position back.
+    if (state.step > 2) {
+      try {
+        const restored = await api('PATCH', `/api/v1/shops/${shop.id}`, { onboardingStep: state.step });
+        state.shops = [restored.shop];
+      } catch {
+        /* not fatal — the seller simply resumes at step 2 next time */
+      }
+    }
+  }
   if (token.length < 20) {
     toast('Paste the full token from @BotFather (it looks like 123456789:AA…)', 'error');
     return;
