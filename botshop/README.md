@@ -12,6 +12,9 @@ their money (merchants bring their own payment gateway — see `docs/adr/0003`).
 > Payments, catalog, orders, subscriptions and referrals are designed (`docs/`) and scheduled
 > (M2–M8 in `docs/07-milestones-and-acceptance.md`).
 
+**New here? Read [docs/START-HERE.md](docs/START-HERE.md)** — a plain-language, step-by-step guide:
+where to put the code, what to configure, what you should see, and how to fix the usual problems.
+
 ---
 
 ## Quick start

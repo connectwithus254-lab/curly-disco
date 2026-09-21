@@ -70,6 +70,11 @@ Create the bot with [@BotFather](https://t.me/BotFather) (`/newbot`), paste the 
 
 ## 2 · VPS deployment with Docker Compose (recommended for going live)
 
+> Prefer a guided walkthrough with expected output at every step? See
+> **[START-HERE.md](START-HERE.md)**. The short version is one command:
+> `bash scripts/quickstart-vps.sh` — it installs Docker, asks for your domain, generates secrets,
+> builds and starts the stack, then prints every URL and path.
+
 Requirements: a small VPS (1 vCPU / 1 GB is enough for the first shops), Docker + Compose, and a
 domain pointing at the server.
 

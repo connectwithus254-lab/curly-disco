@@ -13,7 +13,8 @@ COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
 COPY packages/shared/package.json packages/shared/package.json
 COPY packages/telegram/package.json packages/telegram/package.json
-RUN npm ci
+# Only production dependencies: vitest/embedded-postgres stay out of the image (~400 MB smaller).
+RUN npm ci --omit=dev
 
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
@@ -29,7 +30,7 @@ COPY apps ./apps
 COPY packages ./packages
 COPY scripts ./scripts
 COPY types ./types
-RUN chmod +x scripts/*.mjs && chown -R node:node /app
+RUN chmod +x scripts/*.mjs scripts/*.sh && chown -R node:node /app
 USER node
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
